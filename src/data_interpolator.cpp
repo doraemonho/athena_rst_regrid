@@ -123,17 +123,17 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
         int ic, jc, kc;
         ChildIDToIndex3D(child_id, ic, jc, kc);
         
-        if (old_mb == 30 && child_id == 0) {
-          std::cout << "Debug: About to call ProlongCC for MeshBlock 30, child 0" << std::endl;
+        if (old_mb == 30) {
+          std::cout << "Debug: About to call ProlongCC for MeshBlock 30, child " << child_id << std::endl;
           std::cout << "Debug: ic=" << ic << ", jc=" << jc << ", kc=" << kc << std::endl;
-          std::cout << "Debug: nx1=" << nx1 << ", nx2=" << nx2 << ", nx3=" << nx3 << ", ng=" << ng << std::endl;
+          std::cout << "Debug: new_mb=" << new_mb << std::endl;
         }
         
         ProlongCC(coarse_mhd, fine_mhd, input_data.nmhd, 
                  nx1, nx2, nx3, ng, ic, jc, kc);
                  
-        if (old_mb == 30 && child_id == 0) {
-          std::cout << "Debug: ProlongCC completed for MeshBlock 30, child 0" << std::endl;
+        if (old_mb == 30) {
+          std::cout << "Debug: ProlongCC completed for MeshBlock 30, child " << child_id << std::endl;
         }
       }
     }
@@ -157,7 +157,13 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
     
     // Interpolate turbulence forcing if present
     if (input_data.has_turb) {
+      if (old_mb == 30) {
+        std::cout << "Debug: Starting turbulence interpolation for MeshBlock 30" << std::endl;
+      }
       for (int child_id = 0; child_id < 8; ++child_id) {
+        if (old_mb == 30) {
+          std::cout << "Debug: Turbulence child " << child_id << " for MeshBlock 30" << std::endl;
+        }
         int new_mb = mesh_data.old_to_new_map[old_mb][child_id];
         
         const Real* coarse_force = input_data.force_data.data() + 
@@ -169,6 +175,9 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
         ChildIDToIndex3D(child_id, ic, jc, kc);
         ProlongCC(coarse_force, fine_force, input_data.nforce, 
                  nx1, nx2, nx3, ng, ic, jc, kc);
+        if (old_mb == 30) {
+          std::cout << "Debug: Completed turbulence child " << child_id << " for MeshBlock 30" << std::endl;
+        }
       }
     }
     
