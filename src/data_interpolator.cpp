@@ -23,16 +23,22 @@ bool DataInterpolator::InterpolateAllData(const RestartData& input_data,
   AllocateOutputArrays(input_data, mesh_data, output_data);
   CopyPhysicsParameters(input_data, output_data);
   
+  std::cout << "Debug: Starting cell-centered data interpolation..." << std::endl;
   // Interpolate cell-centered data
   if (!InterpolateCellCenteredData(input_data, mesh_data, output_data)) {
+    std::cerr << "ERROR: Cell-centered data interpolation failed" << std::endl;
     return false;
   }
+  std::cout << "Debug: Cell-centered data interpolation completed" << std::endl;
   
   // Interpolate face-centered magnetic fields
   if (input_data.nmhd > 0) {
+    std::cout << "Debug: Starting face-centered data interpolation..." << std::endl;
     if (!InterpolateFaceCenteredData(input_data, mesh_data, output_data)) {
+      std::cerr << "ERROR: Face-centered data interpolation failed" << std::endl;
       return false;
     }
+    std::cout << "Debug: Face-centered data interpolation completed" << std::endl;
   }
   
   std::cout << "Successfully interpolated all physics data" << std::endl;
@@ -53,13 +59,28 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
   int nout2 = input_data.nout2;
   int nout3 = input_data.nout3;
   
+  std::cout << "Debug: InterpolateCellCenteredData - processing " << input_data.nmb_total << " MeshBlocks" << std::endl;
+  std::cout << "Debug: nhydro=" << input_data.nhydro << ", nmhd=" << input_data.nmhd 
+            << ", nrad=" << input_data.nrad << ", nforce=" << input_data.nforce << std::endl;
+  
   // Process each original MeshBlock
   for (int old_mb = 0; old_mb < input_data.nmb_total; ++old_mb) {
+    if (old_mb % 10 == 0) {
+      std::cout << "Debug: Processing MeshBlock " << old_mb << "/" << input_data.nmb_total << std::endl;
+    }
     
     // Interpolate hydro data if present
     if (input_data.nhydro > 0) {
       for (int child_id = 0; child_id < 8; ++child_id) {
+        if (old_mb >= mesh_data.old_to_new_map.size()) {
+          std::cerr << "ERROR: old_mb " << old_mb << " >= map size " << mesh_data.old_to_new_map.size() << std::endl;
+          return false;
+        }
         int new_mb = mesh_data.old_to_new_map[old_mb][child_id];
+        if (new_mb < 0 || new_mb >= output_data.nmb_total) {
+          std::cerr << "ERROR: Invalid new_mb " << new_mb << " (should be 0-" << (output_data.nmb_total-1) << ")" << std::endl;
+          return false;
+        }
         
         // Get pointers to coarse and fine data
         const Real* coarse_hydro = input_data.hydro_data.data() + 
