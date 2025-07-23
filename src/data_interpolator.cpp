@@ -98,18 +98,43 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
     
     // Interpolate MHD conserved variables if present
     if (input_data.nmhd > 0) {
+      if (old_mb % 10 == 0) {
+        std::cout << "Debug: MHD interpolation for MeshBlock " << old_mb << std::endl;
+      }
       for (int child_id = 0; child_id < 8; ++child_id) {
         int new_mb = mesh_data.old_to_new_map[old_mb][child_id];
         
-        const Real* coarse_mhd = input_data.mhd_data.data() + 
-          old_mb * input_data.nmhd * nout1 * nout2 * nout3;
-        Real* fine_mhd = output_data.mhd_data.data() + 
-          new_mb * output_data.nmhd * nout1 * nout2 * nout3;
+        // Check array bounds
+        size_t coarse_offset = static_cast<size_t>(old_mb) * input_data.nmhd * nout1 * nout2 * nout3;
+        size_t fine_offset = static_cast<size_t>(new_mb) * output_data.nmhd * nout1 * nout2 * nout3;
+        
+        if (coarse_offset >= input_data.mhd_data.size()) {
+          std::cerr << "ERROR: coarse_offset " << coarse_offset << " >= input array size " << input_data.mhd_data.size() << std::endl;
+          return false;
+        }
+        if (fine_offset >= output_data.mhd_data.size()) {
+          std::cerr << "ERROR: fine_offset " << fine_offset << " >= output array size " << output_data.mhd_data.size() << std::endl;
+          return false;
+        }
+        
+        const Real* coarse_mhd = input_data.mhd_data.data() + coarse_offset;
+        Real* fine_mhd = output_data.mhd_data.data() + fine_offset;
         
         int ic, jc, kc;
         ChildIDToIndex3D(child_id, ic, jc, kc);
+        
+        if (old_mb == 30 && child_id == 0) {
+          std::cout << "Debug: About to call ProlongCC for MeshBlock 30, child 0" << std::endl;
+          std::cout << "Debug: ic=" << ic << ", jc=" << jc << ", kc=" << kc << std::endl;
+          std::cout << "Debug: nx1=" << nx1 << ", nx2=" << nx2 << ", nx3=" << nx3 << ", ng=" << ng << std::endl;
+        }
+        
         ProlongCC(coarse_mhd, fine_mhd, input_data.nmhd, 
                  nx1, nx2, nx3, ng, ic, jc, kc);
+                 
+        if (old_mb == 30 && child_id == 0) {
+          std::cout << "Debug: ProlongCC completed for MeshBlock 30, child 0" << std::endl;
+        }
       }
     }
     
