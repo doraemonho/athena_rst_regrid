@@ -790,7 +790,12 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
     std::cout << "Debug: Allocating turbulence array: " << force_size << " elements = " 
               << (force_size * sizeof(Real)) / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     output_data.force_data.resize(force_size);
-    std::cout << "Debug: Turbulence array allocation successful" << std::endl;
+    
+    // CRITICAL FIX: Initialize the array to ensure virtual memory pages are committed
+    std::cout << "Debug: Initializing turbulence array to commit virtual memory..." << std::endl;
+    std::fill(output_data.force_data.begin(), output_data.force_data.end(), 0.0);
+    
+    std::cout << "Debug: Turbulence array allocation and initialization successful" << std::endl;
   }
   
   if (input_data.nz4c > 0) {
