@@ -595,7 +595,8 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
     std::cout << "Debug: Allocating hydro array: " << hydro_size << " elements = " 
               << hydro_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     try {
-      output_data.hydro_data.resize(hydro_size, 0.0);
+      output_data.hydro_data.resize(hydro_size);
+      std::cout << "Debug: Hydro array allocation successful" << std::endl;
     } catch (const std::exception& e) {
       std::cerr << "ERROR: Failed to allocate hydro array: " << e.what() << std::endl;
       throw;
@@ -637,7 +638,8 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
     std::cout << "Debug: Allocating B1f array: " << b1f_size << " elements = " 
               << b1f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     try {
-      output_data.mhd_b1f_data.resize(b1f_size, 0.0);
+      output_data.mhd_b1f_data.resize(b1f_size);
+      std::cout << "Debug: B1f array allocation successful" << std::endl;
     } catch (const std::exception& e) {
       std::cerr << "ERROR: Failed to allocate B1f array: " << e.what() << std::endl;
       throw;
@@ -648,7 +650,8 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
     std::cout << "Debug: Allocating B2f array: " << b2f_size << " elements = " 
               << b2f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     try {
-      output_data.mhd_b2f_data.resize(b2f_size, 0.0);
+      output_data.mhd_b2f_data.resize(b2f_size);
+      std::cout << "Debug: B2f array allocation successful" << std::endl;
     } catch (const std::exception& e) {
       std::cerr << "ERROR: Failed to allocate B2f array: " << e.what() << std::endl;
       throw;
@@ -659,7 +662,8 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
     std::cout << "Debug: Allocating B3f array: " << b3f_size << " elements = " 
               << b3f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
     try {
-      output_data.mhd_b3f_data.resize(b3f_size, 0.0);
+      output_data.mhd_b3f_data.resize(b3f_size);
+      std::cout << "Debug: B3f array allocation successful" << std::endl;
     } catch (const std::exception& e) {
       std::cerr << "ERROR: Failed to allocate B3f array: " << e.what() << std::endl;
       throw;
