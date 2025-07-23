@@ -389,6 +389,11 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
                 int fj = fj_base + dfj; 
                 int fi = fi_base + dfi;
                 
+                // Check bounds to prevent segfault
+                if (fk >= nout3 || fj >= nout2 || fi >= nout1) {
+                  continue; // Skip out-of-bounds writes
+                }
+                
                 // Calculate prolongated value based on position within 2×2×2 stencil
                 Real sign_i = (dfi == 0) ? -1.0 : 1.0;
                 Real sign_j = (dfj == 0) ? -1.0 : 1.0;
