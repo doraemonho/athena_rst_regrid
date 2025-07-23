@@ -671,23 +671,35 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
   }
   
   if (input_data.nrad > 0) {
-    size_t rad_size = nmb_new * input_data.nrad * nout1 * nout2 * nout3;
-    output_data.rad_data.resize(rad_size, 0.0);
+    size_t rad_size = static_cast<size_t>(nmb_new) * input_data.nrad * nout1 * nout2 * nout3;
+    std::cout << "Debug: Allocating radiation array: " << rad_size << " elements = " 
+              << (rad_size * sizeof(Real)) / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    output_data.rad_data.resize(rad_size);
+    std::cout << "Debug: Radiation array allocation successful" << std::endl;
   }
   
   if (input_data.has_turb) {
-    size_t force_size = nmb_new * input_data.nforce * nout1 * nout2 * nout3;
-    output_data.force_data.resize(force_size, 0.0);
+    size_t force_size = static_cast<size_t>(nmb_new) * input_data.nforce * nout1 * nout2 * nout3;
+    std::cout << "Debug: Allocating turbulence array: " << force_size << " elements = " 
+              << (force_size * sizeof(Real)) / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    output_data.force_data.resize(force_size);
+    std::cout << "Debug: Turbulence array allocation successful" << std::endl;
   }
   
   if (input_data.nz4c > 0) {
-    size_t z4c_size = nmb_new * input_data.nz4c * nout1 * nout2 * nout3;
-    output_data.z4c_data.resize(z4c_size, 0.0);
+    size_t z4c_size = static_cast<size_t>(nmb_new) * input_data.nz4c * nout1 * nout2 * nout3;
+    std::cout << "Debug: Allocating Z4c array: " << z4c_size << " elements = " 
+              << (z4c_size * sizeof(Real)) / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    output_data.z4c_data.resize(z4c_size);
+    std::cout << "Debug: Z4c array allocation successful" << std::endl;
   }
   
   if (input_data.nadm > 0) {
-    size_t adm_size = nmb_new * input_data.nadm * nout1 * nout2 * nout3;
-    output_data.adm_data.resize(adm_size, 0.0);
+    size_t adm_size = static_cast<size_t>(nmb_new) * input_data.nadm * nout1 * nout2 * nout3;
+    std::cout << "Debug: Allocating ADM array: " << adm_size << " elements = " 
+              << (adm_size * sizeof(Real)) / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    output_data.adm_data.resize(adm_size);
+    std::cout << "Debug: ADM array allocation successful" << std::endl;
   }
 }
 
