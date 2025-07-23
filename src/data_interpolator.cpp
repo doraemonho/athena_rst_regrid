@@ -361,101 +361,78 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
   bool multi_d = (nx2 > 1);
   bool three_d = (nx3 > 1);
   
-  // Each child MeshBlock fills the entire fine grid using its assigned region of the parent
+  // CORRECTED: Each child extracts its assigned region from coarse and prolongs to fill entire fine grid
+  // Child region offsets in coarse data
+  int coarse_k_start = child_k * (nout3/2);
+  int coarse_j_start = child_j * (nout2/2);
+  int coarse_i_start = child_i * (nout1/2);
   
   for (int n = 0; n < nvar; ++n) {
-    for (int ck = 0; ck < nout3/2; ++ck) {
-      for (int cj = 0; cj < nout2/2; ++cj) {
-        for (int ci = 0; ci < nout1/2; ++ci) {
+    for (int fk = 0; fk < nout3; ++fk) {
+      for (int fj = 0; fj < nout2; ++fj) {
+        for (int fi = 0; fi < nout1; ++fi) {
           
-          // Map coarse indices to parent region based on child position
-          int parent_ck = ck + child_k * (nout3/2);
-          int parent_cj = cj + child_j * (nout2/2);
-          int parent_ci = ci + child_i * (nout1/2);
+          // Map fine cell to corresponding coarse cell in child's region
+          int coarse_k = coarse_k_start + fk / 2;
+          int coarse_j = coarse_j_start + fj / 2;
+          int coarse_i = coarse_i_start + fi / 2;
           
-          // Get coarse cell value from parent region
-          // Note: coarse_data is already offset to the correct MeshBlock, so we use direct indexing
-          size_t c_idx = n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + parent_ci;
-          
-          // Bounds check for coarse data
-          size_t max_coarse_idx = nvar*nout3*nout2*nout1 - 1;
-          if (c_idx > max_coarse_idx) {
-            std::cerr << "ERROR: ProlongCC coarse index out of bounds!" << std::endl;
-            std::cerr << "  c_idx=" << c_idx << ", max_coarse_idx=" << max_coarse_idx << std::endl;
-            std::cerr << "  n=" << n << ", parent_ck=" << parent_ck << ", parent_cj=" << parent_cj << ", parent_ci=" << parent_ci << std::endl;
-            std::cerr << "  nvar=" << nvar << ", nout1=" << nout1 << ", nout2=" << nout2 << ", nout3=" << nout3 << std::endl;
-            return;  // Exit function to avoid crash
-          }
-          
+          // Get coarse cell value
+          size_t c_idx = n*nout3*nout2*nout1 + coarse_k*nout2*nout1 + coarse_j*nout1 + coarse_i;
           Real coarse_val = coarse_data[c_idx];
           
-          // Calculate x1-gradient using AthenaK's exact minmod limiter
+          // Calculate x1-gradient using minmod limiter (with bounds checking)
           Real dl = 0.0, dr = 0.0, dvar1 = 0.0;
-          if (parent_ci > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + (parent_ci-1)];
-          if (parent_ci < nout1-1) dr = coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + (parent_ci+1)] - coarse_val;
+          if (coarse_i > 0) {
+            size_t left_idx = n*nout3*nout2*nout1 + coarse_k*nout2*nout1 + coarse_j*nout1 + (coarse_i-1);
+            dl = coarse_val - coarse_data[left_idx];
+          }
+          if (coarse_i < nout1-1) {
+            size_t right_idx = n*nout3*nout2*nout1 + coarse_k*nout2*nout1 + coarse_j*nout1 + (coarse_i+1);
+            dr = coarse_data[right_idx] - coarse_val;
+          }
           dvar1 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           
-          // Calculate x2-gradient using AthenaK's exact minmod limiter  
+          // Calculate x2-gradient using minmod limiter
           Real dvar2 = 0.0;
           if (multi_d) {
             dl = 0.0; dr = 0.0;
-            if (parent_cj > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + (parent_cj-1)*nout1 + parent_ci];
-            if (parent_cj < nout2-1) dr = coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + (parent_cj+1)*nout1 + parent_ci] - coarse_val;
+            if (coarse_j > 0) {
+              size_t down_idx = n*nout3*nout2*nout1 + coarse_k*nout2*nout1 + (coarse_j-1)*nout1 + coarse_i;
+              dl = coarse_val - coarse_data[down_idx];
+            }
+            if (coarse_j < nout2-1) {
+              size_t up_idx = n*nout3*nout2*nout1 + coarse_k*nout2*nout1 + (coarse_j+1)*nout1 + coarse_i;
+              dr = coarse_data[up_idx] - coarse_val;
+            }
             dvar2 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           }
           
-          // Calculate x3-gradient using AthenaK's exact minmod limiter
+          // Calculate x3-gradient using minmod limiter
           Real dvar3 = 0.0;
           if (three_d) {
             dl = 0.0; dr = 0.0;
-            if (parent_ck > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + (parent_ck-1)*nout2*nout1 + parent_cj*nout1 + parent_ci];
-            if (parent_ck < nout3-1) dr = coarse_data[n*nout3*nout2*nout1 + (parent_ck+1)*nout2*nout1 + parent_cj*nout1 + parent_ci] - coarse_val;
+            if (coarse_k > 0) {
+              size_t back_idx = n*nout3*nout2*nout1 + (coarse_k-1)*nout2*nout1 + coarse_j*nout1 + coarse_i;
+              dl = coarse_val - coarse_data[back_idx];
+            }
+            if (coarse_k < nout3-1) {
+              size_t front_idx = n*nout3*nout2*nout1 + (coarse_k+1)*nout2*nout1 + coarse_j*nout1 + coarse_i;
+              dr = coarse_data[front_idx] - coarse_val;
+            }
             dvar3 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           }
           
-          // Map to fine grid: each coarse cell becomes 2×2×2 fine cells
-          int fk_base = 2*ck;
-          int fj_base = 2*cj; 
-          int fi_base = 2*ci;
+          // Calculate prolongated value using subgrid position
+          Real sign_i = ((fi % 2) == 0) ? -1.0 : 1.0;
+          Real sign_j = ((fj % 2) == 0) ? -1.0 : 1.0;
+          Real sign_k = ((fk % 2) == 0) ? -1.0 : 1.0;
           
-          // Fill 8 fine cells using AthenaK's exact pattern
-          for (int dfk = 0; dfk <= (three_d ? 1 : 0); ++dfk) {
-            for (int dfj = 0; dfj <= (multi_d ? 1 : 0); ++dfj) {
-              for (int dfi = 0; dfi <= 1; ++dfi) {
-                
-                int fk = fk_base + dfk;
-                int fj = fj_base + dfj; 
-                int fi = fi_base + dfi;
-                
-                // Check bounds to prevent segfault
-                if (fk >= nout3 || fj >= nout2 || fi >= nout1) {
-                  continue; // Skip out-of-bounds writes
-                }
-                
-                // Calculate prolongated value based on position within 2×2×2 stencil
-                Real sign_i = (dfi == 0) ? -1.0 : 1.0;
-                Real sign_j = (dfj == 0) ? -1.0 : 1.0;
-                Real sign_k = (dfk == 0) ? -1.0 : 1.0;
-                
-                Real prolongated_val = coarse_val + sign_i*dvar1 + sign_j*dvar2 + sign_k*dvar3;
-                
-                // Note: fine_data is already offset to the correct MeshBlock, so we use direct indexing
-                size_t idx = n*nout3*nout2*nout1 + fk*nout2*nout1 + fj*nout1 + fi;
-                
-                // Bounds check
-                size_t max_idx = nvar*nout3*nout2*nout1 - 1;
-                if (idx > max_idx) {
-                  std::cerr << "ERROR: ProlongCC fine index out of bounds!" << std::endl;
-                  std::cerr << "  idx=" << idx << ", max_idx=" << max_idx << std::endl;
-                  std::cerr << "  n=" << n << ", fk=" << fk << ", fj=" << fj << ", fi=" << fi << std::endl;
-                  std::cerr << "  nvar=" << nvar << ", nout1=" << nout1 << ", nout2=" << nout2 << ", nout3=" << nout3 << std::endl;
-                  return;  // Exit function to avoid crash
-                }
-                
-                fine_data[idx] = prolongated_val;
-              }
-            }
-          }
+          Real prolongated_val = coarse_val + sign_i*dvar1 + sign_j*dvar2 + sign_k*dvar3;
+          
+          // Write to fine grid
+          size_t f_idx = n*nout3*nout2*nout1 + fk*nout2*nout1 + fj*nout1 + fi;
+          fine_data[f_idx] = prolongated_val;
         }
       }
     }
