@@ -603,14 +603,32 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
   }
   
   if (input_data.nmhd > 0) {
+    // Check for potential overflow before allocation
+    uint64_t mhd_size_check = static_cast<uint64_t>(nmb_new) * input_data.nmhd * nout1 * nout2 * nout3;
     size_t mhd_size = static_cast<size_t>(nmb_new) * input_data.nmhd * nout1 * nout2 * nout3;
+    
+    if (mhd_size_check != mhd_size) {
+      std::cerr << "ERROR: Size calculation overflow detected!" << std::endl;
+      std::cerr << "uint64_t calculation: " << mhd_size_check << std::endl;
+      std::cerr << "size_t calculation: " << mhd_size << std::endl;
+      throw std::overflow_error("Array size calculation overflow");
+    }
+    
     size_t mhd_bytes = mhd_size * sizeof(Real);
     std::cout << "Debug: Allocating MHD array: " << mhd_size << " elements = " 
               << mhd_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    std::cout << "Debug: MHD calculation: " << nmb_new << " * " << input_data.nmhd 
+              << " * " << nout1 << " * " << nout2 << " * " << nout3 << std::endl;
+    std::cout << "Debug: sizeof(size_t) = " << sizeof(size_t) << " bytes" << std::endl;
+    
     try {
-      output_data.mhd_data.resize(mhd_size, 0.0);
+      // Try allocating without initialization first
+      output_data.mhd_data.resize(mhd_size);
+      std::cout << "Debug: MHD array allocation successful (no initialization)" << std::endl;
     } catch (const std::exception& e) {
       std::cerr << "ERROR: Failed to allocate MHD array: " << e.what() << std::endl;
+      std::cerr << "ERROR: Requested size: " << mhd_size << " elements (" 
+                << mhd_bytes / (1024.0*1024.0*1024.0) << " GB)" << std::endl;
       throw;
     }
     
