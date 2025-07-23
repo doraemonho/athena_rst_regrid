@@ -130,6 +130,8 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
           std::cout << "Debug: About to call ProlongCC for MeshBlock 30, child " << child_id << std::endl;
           std::cout << "Debug: ic=" << ic << ", jc=" << jc << ", kc=" << kc << std::endl;
           std::cout << "Debug: new_mb=" << new_mb << std::endl;
+          std::cout << "Debug: coarse_offset=" << coarse_offset << ", fine_offset=" << fine_offset << std::endl;
+          std::cout << "Debug: coarse_mhd=" << (void*)coarse_mhd << ", fine_mhd=" << (void*)fine_mhd << std::endl;
         }
         
         ProlongCC(coarse_mhd, fine_mhd, input_data.nmhd, 
@@ -220,6 +222,15 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
     
     if (old_mb >= 30) {
       std::cout << "Debug: Completed all interpolation for MeshBlock " << old_mb << std::endl;
+    }
+    
+    // Check for potential memory corruption by validating array sizes
+    if (old_mb == 34) {
+      std::cout << "Debug: Checking array integrity after MeshBlock 34..." << std::endl;
+      std::cout << "Debug: input_data.mhd_data.size() = " << input_data.mhd_data.size() << std::endl;
+      std::cout << "Debug: output_data.mhd_data.size() = " << output_data.mhd_data.size() << std::endl;
+      std::cout << "Debug: input_data.force_data.size() = " << input_data.force_data.size() << std::endl;
+      std::cout << "Debug: output_data.force_data.size() = " << output_data.force_data.size() << std::endl;
     }
   }
   
