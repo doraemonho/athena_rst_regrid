@@ -348,21 +348,22 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
           int parent_ci = ci + child_i * (nout1/2);
           
           // Get coarse cell value from parent region
-          size_t c_idx = GetIndex5D(0, n, parent_ck, parent_cj, parent_ci, nvar, nout1, nout2, nout3);
+          // Note: coarse_data is already offset to the correct MeshBlock, so we use direct indexing
+          size_t c_idx = n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + parent_ci;
           Real coarse_val = coarse_data[c_idx];
           
           // Calculate x1-gradient using AthenaK's exact minmod limiter
           Real dl = 0.0, dr = 0.0, dvar1 = 0.0;
-          if (parent_ci > 0) dl = coarse_val - coarse_data[GetIndex5D(0, n, parent_ck, parent_cj, parent_ci-1, nvar, nout1, nout2, nout3)];
-          if (parent_ci < nout1-1) dr = coarse_data[GetIndex5D(0, n, parent_ck, parent_cj, parent_ci+1, nvar, nout1, nout2, nout3)] - coarse_val;
+          if (parent_ci > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + (parent_ci-1)];
+          if (parent_ci < nout1-1) dr = coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + (parent_ci+1)] - coarse_val;
           dvar1 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           
           // Calculate x2-gradient using AthenaK's exact minmod limiter  
           Real dvar2 = 0.0;
           if (multi_d) {
             dl = 0.0; dr = 0.0;
-            if (parent_cj > 0) dl = coarse_val - coarse_data[GetIndex5D(0, n, parent_ck, parent_cj-1, parent_ci, nvar, nout1, nout2, nout3)];
-            if (parent_cj < nout2-1) dr = coarse_data[GetIndex5D(0, n, parent_ck, parent_cj+1, parent_ci, nvar, nout1, nout2, nout3)] - coarse_val;
+            if (parent_cj > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + (parent_cj-1)*nout1 + parent_ci];
+            if (parent_cj < nout2-1) dr = coarse_data[n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + (parent_cj+1)*nout1 + parent_ci] - coarse_val;
             dvar2 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           }
           
@@ -370,8 +371,8 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
           Real dvar3 = 0.0;
           if (three_d) {
             dl = 0.0; dr = 0.0;
-            if (parent_ck > 0) dl = coarse_val - coarse_data[GetIndex5D(0, n, parent_ck-1, parent_cj, parent_ci, nvar, nout1, nout2, nout3)];
-            if (parent_ck < nout3-1) dr = coarse_data[GetIndex5D(0, n, parent_ck+1, parent_cj, parent_ci, nvar, nout1, nout2, nout3)] - coarse_val;
+            if (parent_ck > 0) dl = coarse_val - coarse_data[n*nout3*nout2*nout1 + (parent_ck-1)*nout2*nout1 + parent_cj*nout1 + parent_ci];
+            if (parent_ck < nout3-1) dr = coarse_data[n*nout3*nout2*nout1 + (parent_ck+1)*nout2*nout1 + parent_cj*nout1 + parent_ci] - coarse_val;
             dvar3 = 0.125 * (Sign(dl) + Sign(dr)) * fmin(fabs(dl), fabs(dr));
           }
           
@@ -401,7 +402,8 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
                 
                 Real prolongated_val = coarse_val + sign_i*dvar1 + sign_j*dvar2 + sign_k*dvar3;
                 
-                size_t idx = GetIndex5D(0, n, fk, fj, fi, nvar, nout1, nout2, nout3);
+                // Note: fine_data is already offset to the correct MeshBlock, so we use direct indexing
+                size_t idx = n*nout3*nout2*nout1 + fk*nout2*nout1 + fj*nout1 + fi;
                 fine_data[idx] = prolongated_val;
               }
             }
