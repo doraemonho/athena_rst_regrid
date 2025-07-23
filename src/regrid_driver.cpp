@@ -229,12 +229,15 @@ bool RegridDriver::RunVerification() {
 //! \brief Print summary of regridding operation
 void RegridDriver::PrintSummary() const {
   std::cout << "\n=== Regridding Summary ===" << std::endl;
-  std::cout << "Original resolution: " << input_data_.mesh_indcs.nx1 << "³" << std::endl;
-  std::cout << "New resolution: " << mesh_data_.mesh_indcs_new.nx1 << "³" << std::endl;
+  std::cout << "Original resolution: " << input_data_.mesh_indcs.nx1 << "×" 
+            << input_data_.mesh_indcs.nx2 << "×" << input_data_.mesh_indcs.nx3 << std::endl;
+  std::cout << "New resolution: " << mesh_data_.mesh_indcs_new.nx1 << "×" 
+            << mesh_data_.mesh_indcs_new.nx2 << "×" << mesh_data_.mesh_indcs_new.nx3 << std::endl;
   std::cout << "Refinement factor: " << options_.refinement_factor << "x per dimension" << std::endl;
   std::cout << "Original MeshBlocks: " << input_data_.nmb_total << std::endl;
   std::cout << "New MeshBlocks: " << mesh_data_.nmb_total_new << std::endl;
-  std::cout << "MeshBlock size: " << mesh_data_.mb_indcs_new.nx1 << "³ (unchanged)" << std::endl;
+  std::cout << "MeshBlock size: " << mesh_data_.mb_indcs_new.nx1 << "×" 
+            << mesh_data_.mb_indcs_new.nx2 << "×" << mesh_data_.mb_indcs_new.nx3 << " (unchanged)" << std::endl;
   
   // Calculate resolution increase
   long long old_cells = static_cast<long long>(input_data_.mesh_indcs.nx1) * 

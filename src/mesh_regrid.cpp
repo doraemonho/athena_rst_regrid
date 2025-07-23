@@ -18,8 +18,11 @@
 bool MeshRegridder::RegridMesh(const RestartData& input_data, NewMeshData& output_data, int refinement_factor) {
   SetError("");
   
-  std::cout << "Regridding mesh from " << input_data.mesh_indcs.nx1 << "³ to " 
-            << (refinement_factor*input_data.mesh_indcs.nx1) << "³ resolution..." << std::endl;
+  std::cout << "Regridding mesh from " << input_data.mesh_indcs.nx1 << "×" 
+            << input_data.mesh_indcs.nx2 << "×" << input_data.mesh_indcs.nx3 << " to " 
+            << (refinement_factor*input_data.mesh_indcs.nx1) << "×"
+            << (refinement_factor*input_data.mesh_indcs.nx2) << "×"
+            << (refinement_factor*input_data.mesh_indcs.nx3) << " resolution..." << std::endl;
   
   // Validate input mesh
   if (!ValidateInputMesh(input_data)) {
@@ -42,7 +45,7 @@ bool MeshRegridder::RegridMesh(const RestartData& input_data, NewMeshData& outpu
   }
   
   // Validate the regridded mesh
-  if (!ValidateOutputMesh(output_data)) {
+  if (!ValidateOutputMesh(input_data, output_data)) {
     return false;
   }
   
@@ -328,8 +331,12 @@ bool MeshRegridder::ValidateInputMesh(const RestartData& input_data) const {
   if (expected_nmb != input_data.nmb_total) {
     SetError("Mesh dimensions inconsistent with MeshBlock count. Expected " + 
              std::to_string(expected_nmb) + " MeshBlocks for " +
-             std::to_string(input_data.mesh_indcs.nx1) + "³ mesh with " +
-             std::to_string(input_data.mb_indcs.nx1) + "³ MeshBlocks, but found " +
+             std::to_string(input_data.mesh_indcs.nx1) + "×" +
+             std::to_string(input_data.mesh_indcs.nx2) + "×" +
+             std::to_string(input_data.mesh_indcs.nx3) + " mesh with " +
+             std::to_string(input_data.mb_indcs.nx1) + "×" +
+             std::to_string(input_data.mb_indcs.nx2) + "×" +
+             std::to_string(input_data.mb_indcs.nx3) + " MeshBlocks, but found " +
              std::to_string(input_data.nmb_total));
     return false;
   }
@@ -346,7 +353,7 @@ bool MeshRegridder::ValidateInputMesh(const RestartData& input_data) const {
 //----------------------------------------------------------------------------------------
 //! \fn bool MeshRegridder::ValidateOutputMesh()
 //! \brief Validate output mesh structure
-bool MeshRegridder::ValidateOutputMesh(const NewMeshData& output_data) const {
+bool MeshRegridder::ValidateOutputMesh(const RestartData& input_data, const NewMeshData& output_data) const {
   // Check total number of MeshBlocks
   if (output_data.nmb_total_new <= 0) {
     SetError("Invalid number of output MeshBlocks");

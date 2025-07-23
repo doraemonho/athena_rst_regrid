@@ -585,24 +585,67 @@ void DataInterpolator::AllocateOutputArrays(const RestartData& input_data,
   int nout2 = input_data.nout2;
   int nout3 = input_data.nout3;
   
+  std::cout << "Debug: Allocating output arrays for " << nmb_new << " MeshBlocks" << std::endl;
+  std::cout << "Debug: MeshBlock size with ghost zones: " << nout1 << " x " << nout2 << " x " << nout3 << std::endl;
+  
   // Allocate arrays based on what physics modules are present
   if (input_data.nhydro > 0) {
-    size_t hydro_size = nmb_new * input_data.nhydro * nout1 * nout2 * nout3;
-    output_data.hydro_data.resize(hydro_size, 0.0);
+    size_t hydro_size = static_cast<size_t>(nmb_new) * input_data.nhydro * nout1 * nout2 * nout3;
+    size_t hydro_bytes = hydro_size * sizeof(Real);
+    std::cout << "Debug: Allocating hydro array: " << hydro_size << " elements = " 
+              << hydro_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    try {
+      output_data.hydro_data.resize(hydro_size, 0.0);
+    } catch (const std::exception& e) {
+      std::cerr << "ERROR: Failed to allocate hydro array: " << e.what() << std::endl;
+      throw;
+    }
   }
   
   if (input_data.nmhd > 0) {
-    size_t mhd_size = nmb_new * input_data.nmhd * nout1 * nout2 * nout3;
-    output_data.mhd_data.resize(mhd_size, 0.0);
+    size_t mhd_size = static_cast<size_t>(nmb_new) * input_data.nmhd * nout1 * nout2 * nout3;
+    size_t mhd_bytes = mhd_size * sizeof(Real);
+    std::cout << "Debug: Allocating MHD array: " << mhd_size << " elements = " 
+              << mhd_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    try {
+      output_data.mhd_data.resize(mhd_size, 0.0);
+    } catch (const std::exception& e) {
+      std::cerr << "ERROR: Failed to allocate MHD array: " << e.what() << std::endl;
+      throw;
+    }
     
-    size_t b1f_size = nmb_new * nout3 * nout2 * (nout1 + 1);
-    output_data.mhd_b1f_data.resize(b1f_size, 0.0);
+    size_t b1f_size = static_cast<size_t>(nmb_new) * (nout1 + 1) * nout2 * nout3;
+    size_t b1f_bytes = b1f_size * sizeof(Real);
+    std::cout << "Debug: Allocating B1f array: " << b1f_size << " elements = " 
+              << b1f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    try {
+      output_data.mhd_b1f_data.resize(b1f_size, 0.0);
+    } catch (const std::exception& e) {
+      std::cerr << "ERROR: Failed to allocate B1f array: " << e.what() << std::endl;
+      throw;
+    }
     
-    size_t b2f_size = nmb_new * nout3 * (nout2 + 1) * nout1;
-    output_data.mhd_b2f_data.resize(b2f_size, 0.0);
+    size_t b2f_size = static_cast<size_t>(nmb_new) * nout1 * (nout2 + 1) * nout3;
+    size_t b2f_bytes = b2f_size * sizeof(Real);
+    std::cout << "Debug: Allocating B2f array: " << b2f_size << " elements = " 
+              << b2f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    try {
+      output_data.mhd_b2f_data.resize(b2f_size, 0.0);
+    } catch (const std::exception& e) {
+      std::cerr << "ERROR: Failed to allocate B2f array: " << e.what() << std::endl;
+      throw;
+    }
     
-    size_t b3f_size = nmb_new * (nout3 + 1) * nout2 * nout1;
-    output_data.mhd_b3f_data.resize(b3f_size, 0.0);
+    size_t b3f_size = static_cast<size_t>(nmb_new) * nout1 * nout2 * (nout3 + 1);
+    size_t b3f_bytes = b3f_size * sizeof(Real);
+    std::cout << "Debug: Allocating B3f array: " << b3f_size << " elements = " 
+              << b3f_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
+    try {
+      output_data.mhd_b3f_data.resize(b3f_size, 0.0);
+    } catch (const std::exception& e) {
+      std::cerr << "ERROR: Failed to allocate B3f array: " << e.what() << std::endl;
+      throw;
+    }
   }
   
   if (input_data.nrad > 0) {
@@ -641,6 +684,21 @@ void DataInterpolator::CopyPhysicsParameters(const RestartData& input_data,
   output_data.nout1 = input_data.nout1;
   output_data.nout2 = input_data.nout2;
   output_data.nout3 = input_data.nout3;
+  
+  // Calculate total memory allocated
+  size_t total_bytes = 0;
+  total_bytes += output_data.hydro_data.size() * sizeof(Real);
+  total_bytes += output_data.mhd_data.size() * sizeof(Real);
+  total_bytes += output_data.mhd_b1f_data.size() * sizeof(Real);
+  total_bytes += output_data.mhd_b2f_data.size() * sizeof(Real);
+  total_bytes += output_data.mhd_b3f_data.size() * sizeof(Real);
+  total_bytes += output_data.rad_data.size() * sizeof(Real);
+  total_bytes += output_data.force_data.size() * sizeof(Real);
+  total_bytes += output_data.z4c_data.size() * sizeof(Real);
+  total_bytes += output_data.adm_data.size() * sizeof(Real);
+  
+  std::cout << "Debug: Total memory allocated for output arrays: " 
+            << total_bytes / (1024.0*1024.0*1024.0) << " GB" << std::endl;
 }
 
 //----------------------------------------------------------------------------------------

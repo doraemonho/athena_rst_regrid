@@ -79,7 +79,7 @@ class MeshRegridder {
   
   // Validation helpers
   bool ValidateInputMesh(const RestartData& input_data) const;
-  bool ValidateOutputMesh(const NewMeshData& output_data) const;
+  bool ValidateOutputMesh(const RestartData& input_data, const NewMeshData& output_data) const;
   bool CheckNeighborConsistency(const NewMeshData& output_data) const;
   
   // Error reporting
