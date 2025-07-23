@@ -18,8 +18,8 @@
 bool MeshRegridder::RegridMesh(const RestartData& input_data, NewMeshData& output_data, int refinement_factor) {
   SetError("");
   
-  std::cout << "Regridding mesh from " << input_data.mb_indcs.nx1 << "³ to " 
-            << (refinement_factor*input_data.mb_indcs.nx1) << "³ resolution..." << std::endl;
+  std::cout << "Regridding mesh from " << input_data.mesh_indcs.nx1 << "³ to " 
+            << (refinement_factor*input_data.mesh_indcs.nx1) << "³ resolution..." << std::endl;
   
   // Validate input mesh
   if (!ValidateInputMesh(input_data)) {
@@ -59,6 +59,10 @@ bool MeshRegridder::UpdateMeshParameters(const RestartData& input_data, NewMeshD
   // For N³→(rN)³: expand root grid by refinement_factor³ MeshBlocks
   int children_per_parent = refinement_factor * refinement_factor * refinement_factor;
   output_data.nmb_total_new = input_data.nmb_total * children_per_parent;
+  
+  std::cout << "Debug: input nmb_total = " << input_data.nmb_total << std::endl;
+  std::cout << "Debug: children_per_parent = " << children_per_parent << std::endl;
+  std::cout << "Debug: output nmb_total_new = " << output_data.nmb_total_new << std::endl;
   
   // New root level is one higher than the current maximum level
   int max_level = input_data.root_level;
@@ -112,9 +116,18 @@ bool MeshRegridder::UpdateMeshParameters(const RestartData& input_data, NewMeshD
 //! \brief Create new MeshBlock tree - expand 1×1×1 to 2×2×2 root grid (8 MeshBlocks)
 bool MeshRegridder::CreateNewMeshBlockTree(const RestartData& input_data, NewMeshData& output_data) {
   // Reserve space for new arrays (8x more blocks)
-  output_data.lloc_eachmb_new.reserve(output_data.nmb_total_new);
-  output_data.cost_eachmb_new.reserve(output_data.nmb_total_new);
-  output_data.old_to_new_map.resize(input_data.nmb_total);
+  std::cout << "Debug: Allocating space for " << output_data.nmb_total_new << " MeshBlocks" << std::endl;
+  std::cout << "Debug: sizeof(LogicalLocation) = " << sizeof(LogicalLocation) << std::endl;
+  std::cout << "Debug: Total memory for lloc_eachmb_new = " << output_data.nmb_total_new * sizeof(LogicalLocation) << " bytes" << std::endl;
+  
+  try {
+    output_data.lloc_eachmb_new.reserve(output_data.nmb_total_new);
+    output_data.cost_eachmb_new.reserve(output_data.nmb_total_new);
+    output_data.old_to_new_map.resize(input_data.nmb_total);
+  } catch (const std::exception& e) {
+    SetError("Failed to allocate memory for new MeshBlock arrays: " + std::string(e.what()));
+    return false;
+  }
   
   // Create 8 MeshBlocks from each original MeshBlock (2×2×2 expansion)
   int new_gid = 0;
@@ -303,6 +316,21 @@ bool MeshRegridder::ValidateInputMesh(const RestartData& input_data) const {
   // Check MeshBlock structure is valid
   if (input_data.nmb_total <= 0) {
     SetError("Invalid number of MeshBlocks");
+    return false;
+  }
+  
+  // Validate mesh dimensions match MeshBlock count
+  int expected_mb_x = input_data.mesh_indcs.nx1 / input_data.mb_indcs.nx1;
+  int expected_mb_y = input_data.mesh_indcs.nx2 / input_data.mb_indcs.nx2;
+  int expected_mb_z = input_data.mesh_indcs.nx3 / input_data.mb_indcs.nx3;
+  int expected_nmb = expected_mb_x * expected_mb_y * expected_mb_z;
+  
+  if (expected_nmb != input_data.nmb_total) {
+    SetError("Mesh dimensions inconsistent with MeshBlock count. Expected " + 
+             std::to_string(expected_nmb) + " MeshBlocks for " +
+             std::to_string(input_data.mesh_indcs.nx1) + "³ mesh with " +
+             std::to_string(input_data.mb_indcs.nx1) + "³ MeshBlocks, but found " +
+             std::to_string(input_data.nmb_total));
     return false;
   }
   

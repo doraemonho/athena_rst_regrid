@@ -128,6 +128,12 @@ bool RestartReader::ReadHeader(IOWrapper& file, RestartData& data) {
     return false;
   }
   
+  std::cout << "Debug: Read mesh dimensions: " << data.mesh_indcs.nx1 << " x " 
+            << data.mesh_indcs.nx2 << " x " << data.mesh_indcs.nx3 << std::endl;
+  std::cout << "Debug: Read MeshBlock dimensions: " << data.mb_indcs.nx1 << " x " 
+            << data.mb_indcs.nx2 << " x " << data.mb_indcs.nx3 << std::endl;
+  std::cout << "Debug: Total MeshBlocks: " << data.nmb_total << std::endl;
+  
   // Read simulation time
   if (file.Read_bytes(&data.time, sizeof(Real), 1) != sizeof(Real)) {
     SetError("Failed to read time");

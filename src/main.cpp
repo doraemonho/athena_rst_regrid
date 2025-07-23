@@ -1,330 +1,223 @@
-//========================================================================================
-// Athena astrophysical MHD code (Kokkos version)
-// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
-// Licensed under the 3-clause BSD License (the "LICENSE")
-//========================================================================================
-//////////////////////////////////// Athena Main Program /////////////////////////////////
-//! \file main.cpp
-//! \brief Athena main program
-//!
-//! Based on the Athena (Cambridge version) and Athena++ MHD codes. Athena originally was
-//! written in 2002-2005 by Jim Stone, Tom Gardiner, and Peter Teuben, with many important
-//! contributions by many other developers after that, i.e. 2005-2014.
-//!
-//! Athena++ was started in Jan 2014, with the core design developed 4-7/2014 during an
-//! extended visit to the KITP at UCSB by J. Stone. GR was implemented by Chris White and
-//! AMR by Kengo Tomida 2014-2016, with contributions from many others (esp. K. Felker)
-//! continuing after that.
-//!
-//! Athena (Kokkos version) is an outgrowth of the Athena-Parthenon collaboration, and is
-//! a completely new implementation based on the Kokkos performance-portability library
-//! (which is an external dependency required for this version). It was started 6/2020
-//! during the pandemic. As part of the keep-it-simple design, only a fraction of the
-//! features of the C++ version are implemented.
-//========================================================================================
+// AthenaK Regridding Tool - Main Program
 
-// C/C++ headers
-#include <cstdlib>
 #include <iostream>
 #include <string>
-#include <memory>
-#include <cstdio> // sscanf
+#include <vector>
+#include <cstdlib>
+#include <getopt.h>
 
-// Athena headers
-#include "athena.hpp"
-#include "globals.hpp"
-#include "utils/utils.hpp"
-#include "parameter_input.hpp"
-#include "mesh/mesh.hpp"
-#include "outputs/outputs.hpp"
-#include "driver/driver.hpp"
+#include "regrid_driver.hpp"
 
-// MPI/OpenMP headers
-#if MPI_PARALLEL_ENABLED
-#include <mpi.h>
+void PrintUsage(const char* program_name);
+void PrintVersion();
+bool ParseCommandLine(int argc, char* argv[], RegridOptions& options);
+
+//! \fn int main()
+//! \brief Main function
+int main(int argc, char* argv[]) {
+  
+  // Parse command line arguments
+  RegridOptions options;
+  if (!ParseCommandLine(argc, argv, options)) {
+    PrintUsage(argv[0]);
+    return EXIT_FAILURE;
+  }
+  
+  // Initialize and run regridding
+  RegridDriver driver;
+  
+  try {
+    if (!driver.RunRegridding(options)) {
+      std::cerr << "ERROR: " << driver.GetLastError() << std::endl;
+      return EXIT_FAILURE;
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "EXCEPTION: " << e.what() << std::endl;
+    return EXIT_FAILURE;
+  } catch (...) {
+    std::cerr << "UNKNOWN ERROR: An unexpected error occurred" << std::endl;
+    return EXIT_FAILURE;
+  }
+  
+  return EXIT_SUCCESS;
+}
+
+//! \fn void PrintUsage()
+//! \brief Print usage information
+void PrintUsage(const char* program_name) {
+  std::cout << "\nAthenaK MHD Restart File Regridding Tool" << std::endl;
+  std::cout << "=========================================" << std::endl;
+  std::cout << "Usage: " << program_name << " [options] <input_file> <output_file>" << std::endl;
+  std::cout << "\nRequired arguments:" << std::endl;
+  std::cout << "  input_file          Input AthenaK restart file (.rst)" << std::endl;
+  std::cout << "  output_file         Output regridded restart file (.rst)" << std::endl;
+  
+  std::cout << "\nOptions:" << std::endl;
+  std::cout << "  -h, --help          Show this help message" << std::endl;
+  std::cout << "  -v, --version       Show version information" << std::endl;
+  std::cout << "  -q, --quiet         Suppress progress output" << std::endl;
+  std::cout << "  --verbose           Enable detailed output" << std::endl;
+  std::cout << "  -b, --benchmark     Show detailed timing information" << std::endl;
+  
+  std::cout << "\nRegridding options:" << std::endl;
+  std::cout << "  -r, --refine=N      Refinement factor (default: 2)" << std::endl;
+  
+  std::cout << "\nVerification options:" << std::endl;
+  std::cout << "  --no-conservation   Skip conservation checks" << std::endl;
+  std::cout << "  --no-divergence     Skip ∇·B = 0 verification" << std::endl;
+  
+  std::cout << "\nOutput options:" << std::endl;
+  std::cout << "  --file-number=N     Set output file number" << std::endl;
+  std::cout << "  --new-time=T        Set new simulation time" << std::endl;
+  
+  std::cout << "\nExamples:" << std::endl;
+  std::cout << "  " << program_name << " input.rst output.rst" << std::endl;
+  std::cout << "  " << program_name << " -r 2 --verbose input.00100.rst output.00100.rst" << std::endl;
+  std::cout << "  " << program_name << " --refine=4 --benchmark turb.01000.rst turb_fine.01000.rst" << std::endl;
+  
+  std::cout << "\nDescription:" << std::endl;
+  std::cout << "  This tool regrids AthenaK MHD restart files from N³ to (rN)³ resolution" << std::endl;
+  std::cout << "  while preserving the same meshblock size. It uses AthenaK's prolongation" << std::endl;
+  std::cout << "  operators to ensure physical accuracy and conservation properties." << std::endl;
+  
+  std::cout << "\nSupported physics modules:" << std::endl;
+  std::cout << "  - MHD (required)" << std::endl;
+  std::cout << "  - Hydro" << std::endl;
+  std::cout << "  - Radiation" << std::endl;
+  std::cout << "  - Turbulence forcing" << std::endl;
+  std::cout << "  - Z4c/ADM (general relativity)" << std::endl;
+  std::cout << std::endl;
+}
+
+//! \fn void PrintVersion()
+//! \brief Print version information
+void PrintVersion() {
+  std::cout << "AthenaK MHD Restart File Regridding Tool" << std::endl;
+  std::cout << "Version: " << REGRID_TOOL_VERSION << std::endl;
+  std::cout << "Built with AthenaK prolongation operators" << std::endl;
+  std::cout << "Supports MHD, hydro, radiation, turbulence, and GR physics modules" << std::endl;
+  
+#if SINGLE_PRECISION_ENABLED
+  std::cout << "Precision: Single (float)" << std::endl;
+#else
+  std::cout << "Precision: Double (double)" << std::endl;
 #endif
 
-#if OPENMP_PARALLEL_ENABLED
-#include <omp.h>
-#endif
 
-#if defined(KOKKOS_ENABLE_HIP)
-#include <hip/hip_runtime.h>
-#endif
+  std::cout << "\nFor more information, see develop.md in the source directory." << std::endl;
+}
 
-//----------------------------------------------------------------------------------------
-//! \fn int main(int argc, char *argv[])
-//! \brief Athena main program
-
-int main(int argc, char *argv[]) {
-  std::string input_file, restart_file, run_dir;
-  bool iarg_flag = false;  // set to true if -i <file> argument is on cmdline
-  bool marg_flag = false;  // set to true if -m        argument is on cmdline
-  bool narg_flag = false;  // set to true if -n        argument is on cmdline
-  bool  res_flag = false;  // set to true if -r <file> argument is on cmdline
-  Real wtlim = 0;
-
-  //--- Step 1. --------------------------------------------------------------------------
-  // Initialize environment (must initialize MPI first, then Kokkos)
-
-#if MPI_PARALLEL_ENABLED
-#if defined(KOKKOS_ENABLE_HIP)
-  // JMF: This is a bizarre workaround to avoid segmentation faults on Frontier.
-  // See OLCFDEV-1655: Occasional seg-fault during MPI_Init inside the Frontier
-  // documentation.
-  (void) hipInit(0);
-#endif
-#if OPENMP_PARALLEL_ENABLED
-  int mpiprv;
-  if (MPI_SUCCESS != MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &mpiprv)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "MPI Initialization failed." << std::endl;
-    return(0);
+//! \fn bool ParseCommandLine()
+//! \brief Parse command line arguments
+bool ParseCommandLine(int argc, char* argv[], RegridOptions& options) {
+  // Set default values
+  options.refinement_factor = 2;
+  options.preserve_time = true;
+  options.verify_conservation = true;
+  options.verify_divergence_b = true;
+  options.verbose = false;
+  options.show_progress = true;
+  options.benchmark = false;
+  options.output_file_number = 0;
+  options.new_time = 0.0;
+  
+  // Define long options
+  static struct option long_options[] = {
+    {"help",            no_argument,       0, 'h'},
+    {"version",         no_argument,       0, 'v'},
+    {"quiet",           no_argument,       0, 'q'},
+    {"verbose",         no_argument,       0, 1001},
+    {"benchmark",       no_argument,       0, 'b'},
+    {"refine",          required_argument, 0, 'r'},
+    {"no-conservation", no_argument,       0, 1003},
+    {"no-divergence",   no_argument,       0, 1004},
+    {"file-number",     required_argument, 0, 1005},
+    {"new-time",        required_argument, 0, 1006},
+    {0, 0, 0, 0}
+  };
+  
+  int option_index = 0;
+  int c;
+  
+  while ((c = getopt_long(argc, argv, "hvqbr:", long_options, &option_index)) != -1) {
+    switch (c) {
+      case 'h':
+        PrintUsage(argv[0]);
+        exit(EXIT_SUCCESS);
+        break;
+        
+      case 'v':
+        PrintVersion();
+        exit(EXIT_SUCCESS);
+        break;
+        
+      case 'q':
+        options.show_progress = false;
+        break;
+        
+      case 1001: // --verbose
+        options.verbose = true;
+        break;
+        
+      case 'b':
+        options.benchmark = true;
+        break;
+        
+      case 'r':
+        options.refinement_factor = std::atoi(optarg);
+        if (options.refinement_factor < 1 || options.refinement_factor > 4) {
+          std::cerr << "ERROR: Refinement factor must be between 1 and 4" << std::endl;
+          return false;
+        }
+        break;
+        
+        
+      case 1003: // --no-conservation
+        options.verify_conservation = false;
+        break;
+        
+      case 1004: // --no-divergence
+        options.verify_divergence_b = false;
+        break;
+        
+      case 1005: // --file-number
+        options.output_file_number = std::atoi(optarg);
+        break;
+        
+      case 1006: // --new-time
+        options.new_time = std::atof(optarg);
+        options.preserve_time = false;
+        break;
+        
+      case '?':
+        // getopt_long already printed an error message
+        return false;
+        
+      default:
+        std::cerr << "ERROR: Unknown option" << std::endl;
+        return false;
+    }
   }
-  if (mpiprv != MPI_THREAD_MULTIPLE) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "MPI_THREAD_MULTIPLE must be supported for hybrid parallelzation. "
-              << MPI_THREAD_MULTIPLE << " : " << mpiprv
-              << std::endl;
-    MPI_Finalize();
-    return(0);
+  
+  // Check for required positional arguments
+  if (optind + 2 != argc) {
+    std::cerr << "ERROR: Exactly two arguments required: input_file output_file" << std::endl;
+    return false;
   }
-#else  // no OpenMP
-  if (MPI_SUCCESS != MPI_Init(&argc, &argv)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "MPI Initialization failed." << std::endl;
-    return(0);
+  
+  options.input_file = argv[optind];
+  options.output_file = argv[optind + 1];
+  
+  // Validate file extensions
+  if (options.input_file.size() < 4 || 
+      options.input_file.substr(options.input_file.size()-4) != ".rst") {
+    std::cerr << "WARNING: Input file should have .rst extension" << std::endl;
   }
-#endif  // OPENMP_PARALLEL_ENABLED
-  // Get process id (rank) in MPI_COMM_WORLD
-  if (MPI_SUCCESS != MPI_Comm_rank(MPI_COMM_WORLD, &(global_variable::my_rank))) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "MPI_Comm_rank failed." << std::endl;
-    MPI_Finalize();
-    return(0);
+  
+  if (options.output_file.size() < 4 || 
+      options.output_file.substr(options.output_file.size()-4) != ".rst") {
+    std::cerr << "WARNING: Output file should have .rst extension" << std::endl;
   }
-
-  // Get total number of MPI processes (ranks)
-  if (MPI_SUCCESS != MPI_Comm_size(MPI_COMM_WORLD, &global_variable::nranks)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "MPI_Comm_size failed." << std::endl;
-    MPI_Finalize();
-    return(0);
-  }
-#else  // no MPI
-  global_variable::my_rank = 0;
-  global_variable::nranks  = 1;
-#endif  // MPI_PARALLEL_ENABLED
-
-  Kokkos::initialize(argc, argv);
-
-  //--- Step 2. --------------------------------------------------------------------------
-  // Check for command line options and respond.
-
-  for (int i=1; i<argc; i++) {
-    // If argv[i] is a 2 character string of the form "-?" then:
-    if (*argv[i] == '-'  && *(argv[i]+1) != '\0' && *(argv[i]+2) == '\0') {
-      // check that command line options that require arguments actually have them:
-      char opt_letter = *(argv[i]+1);
-      switch(opt_letter) {
-        case 'c':
-        case 'h':
-        case 'm':
-        case 'n':
-          break;
-        default:
-          if ((i+1 >= argc) // no argument after option
-              || (*argv[i+1] == '-') ) { // option is followed by another option
-            if (global_variable::my_rank == 0) {
-              std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                        << std::endl << "-" << opt_letter
-                        << " must be followed by a valid argument" << std::endl;
-              Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-              MPI_Finalize();
-#endif
-              return(0);
-            }
-          }
-      }
-
-      // set arguments, flags, or execute tasks specified by options
-      switch(*(argv[i]+1)) {
-        case 'i':                      // -i <input_file>
-          input_file.assign(argv[++i]);
-          iarg_flag = true;
-          break;
-        case 'r':                      // -r <restart_file>
-          restart_file.assign(argv[++i]);
-          res_flag = true;
-          break;
-        case 'd':                      // -d <run_directory>
-          run_dir.assign(argv[++i]);
-          break;
-        case 'n':
-          narg_flag = true;
-          break;
-        case 'm':
-          marg_flag = true;
-          break;
-        case 't':                      // -t <hh:mm:ss>
-          int wth, wtm, wts;
-          std::sscanf(argv[++i], "%d:%d:%d", &wth, &wtm, &wts);
-          wtlim = static_cast<Real>(wth*3600 + wtm*60 + wts);
-          break;
-        case 'c':
-          if (global_variable::my_rank == 0) ShowConfig();
-          Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-          MPI_Finalize();
-#endif
-          return(0);
-          break;
-        case 'h':
-        default:
-          if (global_variable::my_rank == 0) {
-            std::cout << "Athena v" << ATHENA_VERSION_MAJOR << "."
-                                    << ATHENA_VERSION_MINOR << std::endl;
-            std::cout << "Usage: " << argv[0] << " [options] [block/par=value ...]\n";
-            std::cout << "Options:" << std::endl;
-            std::cout << "  -i <file>       specify input file [athinput]\n";
-            std::cout << "  -r <file>       restart with this file\n";
-            std::cout << "  -d <directory>  specify run dir [current dir]\n";
-            std::cout << "  -n              parse input file and quit\n";
-            std::cout << "  -c              show configuration and quit\n";
-            std::cout << "  -m              output mesh structure and quit\n";
-            std::cout << "  -t hh:mm:ss     wall time limit for final output\n";
-            std::cout << "  -h              this help\n";
-            ShowConfig();
-          }
-          Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-          MPI_Finalize();
-#endif
-          return(0);
-          break;
-      }
-    } // else if argv[i] not of form "-?" ignore it here (tested in ModifyFromCmdline)
-  }
-
-  // print error if input or restart file not given
-  if (restart_file.empty() && input_file.empty()) {
-    // no input file is given
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "Either an input or restart file must be specified." << std::endl
-              << "See " << argv[0] << " -h for options and usage." << std::endl;
-    Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-    MPI_Finalize();
-#endif
-    return(0);
-  }
-
-  // Start the wall clock timer. This is done here rather than in the Driver to ensure
-  // that the time taken in ProblemGenerator is also captured.
-  Kokkos::Timer timer;
-
-  //--- Step 3. --------------------------------------------------------------------------
-  // Construct ParameterInput object and load data either from restart or input file.
-  // With MPI, the input is read by every rank in parallel using MPI-IO.
-
-  ParameterInput* pinput = new ParameterInput;
-  IOWrapper infile, restartfile;
-  // read parameters from restart file
-  if (res_flag) {
-    restartfile.Open(restart_file.c_str(), IOWrapper::FileMode::read);
-    pinput->LoadFromFile(restartfile);
-  }
-  // read parameters from input file.  If both -r and -i are specified, this will
-  // override parameters from the restart file
-  if (iarg_flag) {
-    infile.Open(input_file.c_str(), IOWrapper::FileMode::read);
-    pinput->LoadFromFile(infile);
-    infile.Close();
-  }
-  pinput->ModifyFromCmdline(argc, argv);
-
-  // Dump input parameters and quit if code was run with -n option.
-  if (narg_flag) {
-    if (global_variable::my_rank == 0) pinput->ParameterDump(std::cout);
-    if (res_flag) restartfile.Close();
-    delete pinput;
-    Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-    MPI_Finalize();
-#endif
-    return(0);
-  }
-
-  //--- Step 4. --------------------------------------------------------------------------
-  // Construct Mesh.  Then build MeshBlockTree and add MeshBlockPack containing MeshBlocks
-  // on this rank.  Latter cannot be performed in Mesh constructor since it requires
-  // pointer to Mesh.
-
-  Mesh* pmesh = new Mesh(pinput);
-  if (!res_flag) {
-    pmesh->BuildTreeFromScratch(pinput);
-  } else {
-    pmesh->BuildTreeFromRestart(pinput, restartfile);
-  }
-
-  //  If code was run with -m option, write mesh structure to file and quit.
-  if (marg_flag) {
-    if (global_variable::my_rank == 0) {pmesh->WriteMeshStructure();}
-    if (res_flag) {restartfile.Close();}
-    delete pmesh;
-    delete pinput;
-    Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-    MPI_Finalize();
-#endif
-    return(0);
-  }
-
-  //--- Step 5. --------------------------------------------------------------------------
-  // Add coordinates and physics modules to MeshBlockPack, and set initial conditions.
-  // Note these steps must occur after Mesh (including MeshBlocks and MeshBlockPack)
-  // is fully constructed.
-
-  pmesh->AddCoordinatesAndPhysics(pinput);
-  if (!res_flag) {
-    // set ICs using ProblemGenerator constructor for new runs
-    pmesh->pgen = std::make_unique<ProblemGenerator>(pinput, pmesh);
-  } else {
-    // read ICs from restart file using ProblemGenerator constructor for restarts
-    pmesh->pgen = std::make_unique<ProblemGenerator>(pinput, pmesh, restartfile);
-    restartfile.Close();
-  }
-
-  //--- Step 6. --------------------------------------------------------------------------
-  // Construct Driver and Outputs. Actual outputs (including initial conditions) are made
-  // in Driver.Initialize(). Add wall clock timer to Driver if necessary.
-
-  ChangeRunDir(run_dir);
-  Driver* pdriver = new Driver(pinput, pmesh, wtlim, &timer);
-  Outputs* pout = new Outputs(pinput, pmesh);
-
-  //--- Step 7. --------------------------------------------------------------------------
-  // Execute Driver.
-  //    1. Initial conditions set in Driver::Initialize()
-  //    2. TaskList(s) executed in Driver::Execute()
-  //    3. Any final analysis or diagnostics run in Driver::Finalize()
-
-  pdriver->Initialize(pmesh, pinput, pout, res_flag);
-  pdriver->Execute(pmesh, pinput, pout);
-  pdriver->Finalize(pmesh, pinput, pout);
-
-  //--- Step 8. -------------------------------------------------------------------------
-  // clean up, and terminate
-  // Note anything containing a Kokkos::view must be deleted before Kokkos::finalize()
-
-  delete pout;
-  delete pdriver;
-  delete pmesh;
-  delete pinput;
-  Kokkos::finalize();
-#if MPI_PARALLEL_ENABLED
-  MPI_Finalize();
-#endif
-  return(0);
+  
+  return true;
 }
