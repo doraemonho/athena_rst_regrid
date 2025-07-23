@@ -101,15 +101,25 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
     
     // Interpolate MHD conserved variables if present
     if (input_data.nmhd > 0) {
-      if (old_mb % 10 == 0) {
+      if (old_mb % 10 == 0 || old_mb >= 35) {
         std::cout << "Debug: MHD interpolation for MeshBlock " << old_mb << std::endl;
       }
       for (int child_id = 0; child_id < 8; ++child_id) {
+        if (old_mb >= 35) {
+          std::cout << "Debug: MeshBlock " << old_mb << ", processing child " << child_id << std::endl;
+        }
         int new_mb = mesh_data.old_to_new_map[old_mb][child_id];
+        if (old_mb >= 35) {
+          std::cout << "Debug: new_mb = " << new_mb << std::endl;
+        }
         
         // Check array bounds
         size_t coarse_offset = static_cast<size_t>(old_mb) * input_data.nmhd * nout1 * nout2 * nout3;
         size_t fine_offset = static_cast<size_t>(new_mb) * output_data.nmhd * nout1 * nout2 * nout3;
+        
+        if (old_mb >= 35) {
+          std::cout << "Debug: coarse_offset = " << coarse_offset << ", fine_offset = " << fine_offset << std::endl;
+        }
         
         if (coarse_offset >= input_data.mhd_data.size()) {
           std::cerr << "ERROR: coarse_offset " << coarse_offset << " >= input array size " << input_data.mhd_data.size() << std::endl;
@@ -120,11 +130,24 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
           return false;
         }
         
+        if (old_mb >= 35) {
+          std::cout << "Debug: Bounds checks passed" << std::endl;
+        }
+        
         const Real* coarse_mhd = input_data.mhd_data.data() + coarse_offset;
         Real* fine_mhd = output_data.mhd_data.data() + fine_offset;
         
+        if (old_mb >= 35) {
+          std::cout << "Debug: Pointers assigned" << std::endl;
+        }
+        
         int ic, jc, kc;
         ChildIDToIndex3D(child_id, ic, jc, kc);
+        
+        if (old_mb >= 35) {
+          std::cout << "Debug: About to call ProlongCC for MeshBlock " << old_mb << ", child " << child_id << std::endl;
+          std::cout << "Debug: ic=" << ic << ", jc=" << jc << ", kc=" << kc << std::endl;
+        }
         
         if (old_mb == 30) {
           std::cout << "Debug: About to call ProlongCC for MeshBlock 30, child " << child_id << std::endl;
@@ -137,6 +160,9 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
         ProlongCC(coarse_mhd, fine_mhd, input_data.nmhd, 
                  nx1, nx2, nx3, ng, ic, jc, kc);
                  
+        if (old_mb >= 35) {
+          std::cout << "Debug: ProlongCC completed for MeshBlock " << old_mb << ", child " << child_id << std::endl;
+        }
         if (old_mb == 30) {
           std::cout << "Debug: ProlongCC completed for MeshBlock 30, child " << child_id << std::endl;
         }
@@ -350,6 +376,17 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
           // Get coarse cell value from parent region
           // Note: coarse_data is already offset to the correct MeshBlock, so we use direct indexing
           size_t c_idx = n*nout3*nout2*nout1 + parent_ck*nout2*nout1 + parent_cj*nout1 + parent_ci;
+          
+          // Bounds check for coarse data
+          size_t max_coarse_idx = nvar*nout3*nout2*nout1 - 1;
+          if (c_idx > max_coarse_idx) {
+            std::cerr << "ERROR: ProlongCC coarse index out of bounds!" << std::endl;
+            std::cerr << "  c_idx=" << c_idx << ", max_coarse_idx=" << max_coarse_idx << std::endl;
+            std::cerr << "  n=" << n << ", parent_ck=" << parent_ck << ", parent_cj=" << parent_cj << ", parent_ci=" << parent_ci << std::endl;
+            std::cerr << "  nvar=" << nvar << ", nout1=" << nout1 << ", nout2=" << nout2 << ", nout3=" << nout3 << std::endl;
+            return;  // Exit function to avoid crash
+          }
+          
           Real coarse_val = coarse_data[c_idx];
           
           // Calculate x1-gradient using AthenaK's exact minmod limiter
@@ -404,6 +441,17 @@ void DataInterpolator::ProlongCC(const Real* coarse_data, Real* fine_data,
                 
                 // Note: fine_data is already offset to the correct MeshBlock, so we use direct indexing
                 size_t idx = n*nout3*nout2*nout1 + fk*nout2*nout1 + fj*nout1 + fi;
+                
+                // Bounds check
+                size_t max_idx = nvar*nout3*nout2*nout1 - 1;
+                if (idx > max_idx) {
+                  std::cerr << "ERROR: ProlongCC fine index out of bounds!" << std::endl;
+                  std::cerr << "  idx=" << idx << ", max_idx=" << max_idx << std::endl;
+                  std::cerr << "  n=" << n << ", fk=" << fk << ", fj=" << fj << ", fi=" << fi << std::endl;
+                  std::cerr << "  nvar=" << nvar << ", nout1=" << nout1 << ", nout2=" << nout2 << ", nout3=" << nout3 << std::endl;
+                  return;  // Exit function to avoid crash
+                }
+                
                 fine_data[idx] = prolongated_val;
               }
             }
