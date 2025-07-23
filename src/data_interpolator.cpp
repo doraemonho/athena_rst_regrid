@@ -60,12 +60,15 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
   int nout3 = input_data.nout3;
   
   std::cout << "Debug: InterpolateCellCenteredData - processing " << input_data.nmb_total << " MeshBlocks" << std::endl;
-  std::cout << "Debug: nhydro=" << input_data.nhydro << ", nmhd=" << input_data.nmhd 
+  std::cout << "Debug: input: nhydro=" << input_data.nhydro << ", nmhd=" << input_data.nmhd 
             << ", nrad=" << input_data.nrad << ", nforce=" << input_data.nforce << std::endl;
+  std::cout << "Debug: output: nhydro=" << output_data.nhydro << ", nmhd=" << output_data.nmhd 
+            << ", nrad=" << output_data.nrad << ", nforce=" << output_data.nforce << std::endl;
+  std::cout << "Debug: output nmb_total=" << output_data.nmb_total << std::endl;
   
   // Process each original MeshBlock
   for (int old_mb = 0; old_mb < input_data.nmb_total; ++old_mb) {
-    if (old_mb % 10 == 0) {
+    if (old_mb % 10 == 0 || old_mb >= 30) {
       std::cout << "Debug: Processing MeshBlock " << old_mb << "/" << input_data.nmb_total << std::endl;
     }
     
@@ -214,7 +217,13 @@ bool DataInterpolator::InterpolateCellCenteredData(const RestartData& input_data
                  nx1, nx2, nx3, ng, ic, jc, kc);
       }
     }
+    
+    if (old_mb >= 30) {
+      std::cout << "Debug: Completed all interpolation for MeshBlock " << old_mb << std::endl;
+    }
   }
+  
+  std::cout << "Debug: Finished processing all MeshBlocks in InterpolateCellCenteredData" << std::endl;
   
   return true;
 }
