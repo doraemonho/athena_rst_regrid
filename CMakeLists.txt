@@ -1,63 +1,76 @@
-# CMakeLists.txt for AthenaK MHD Regridding Tool
-#=========================================================================================
-# AthenaK Regridding Tool
-# Licensed under the 3-clause BSD License (the "LICENSE")
-#=========================================================================================
-
 cmake_minimum_required(VERSION 3.10)
-project(athena_regrid VERSION 1.0 LANGUAGES CXX)
+project(athena_restart_reader)
 
-# Disable in-source builds
-if( "${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}" )
-  message(FATAL_ERROR "FATAL: In-source builds disabled. Please create a separate build directory.")
-endif()
-
-# C++17 standard required
+# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Default build type
+# Build type configuration
 if(NOT CMAKE_BUILD_TYPE)
-  message(STATUS "Setting build type to 'Release' as none was specified.")
-  set(CMAKE_BUILD_TYPE Release)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-#------ Compile options ----------------------------------------------------------------
+# Compiler flags
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-option(REGRID_SINGLE_PRECISION "Use single precision" OFF)
+# Options
+option(ENABLE_MPI "Enable MPI parallelization" ON)
 
-#------ Precision Configuration --------------------------------------------------------
-
-if(REGRID_SINGLE_PRECISION)
-    add_definitions(-DSINGLE_PRECISION_ENABLED=1)
+# MPI Configuration
+if(ENABLE_MPI)
+    find_package(MPI REQUIRED)
+    add_compile_definitions(MPI_PARALLEL_ENABLED)
+    message(STATUS "MPI support enabled")
+    message(STATUS "MPI C++ compiler: ${MPI_CXX_COMPILER}")
 else()
-    add_definitions(-DSINGLE_PRECISION_ENABLED=0)
+    message(STATUS "MPI support disabled")
 endif()
 
-#------ Include directories ------------------------------------------------------------
-
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-#------ Source files -------------------------------------------------------------------
-
-set(REGRID_SOURCES
-    src/main.cpp
-    src/regrid_driver.cpp
-    src/restart_reader.cpp
-    src/restart_writer.cpp
-    src/mesh_regrid.cpp
-    src/data_interpolator.cpp
-    src/verification.cpp
-    src/io_wrapper.cpp
+# Source files
+set(SOURCES
+    main.cpp
+    restart_reader.cpp
+    io_wrapper.cpp
+    parameter_parser.cpp
+    mpi_distribution.cpp
+    physics_reader.cpp
+    upscaler.cpp
+    restart_writer.cpp
+    simple_parameter_input.cpp
 )
 
-#------ Create executables -------------------------------------------------------------
-
-# Main regridding tool
-add_executable(athena_regrid ${REGRID_SOURCES})
-
-target_compile_definitions(athena_regrid PRIVATE
-    -DREGRID_TOOL_VERSION="1.0"
+# Header files
+set(HEADERS
+    common.hpp
+    restart_reader.hpp
+    io_wrapper.hpp
+    parameter_parser.hpp
+    mpi_distribution.hpp
+    physics_reader.hpp
+    prolongation.hpp
+    upscaler.hpp
+    restart_writer.hpp
+    simple_parameter_input.hpp
 )
 
+# Create main executable
+add_executable(restart_reader ${SOURCES})
+
+# Create static library (optional, for linking with other projects)
+add_library(restart_reader_lib STATIC ${SOURCES})
+target_include_directories(restart_reader_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# MPI linking
+if(ENABLE_MPI)
+    target_link_libraries(restart_reader PRIVATE MPI::MPI_CXX)
+    target_link_libraries(restart_reader_lib PUBLIC MPI::MPI_CXX)
+endif()
+
+# Installation
+install(TARGETS restart_reader 
+        RUNTIME DESTINATION bin)
+install(TARGETS restart_reader_lib 
+        ARCHIVE DESTINATION lib)
+install(FILES ${HEADERS} 
+        DESTINATION include/restart_reader)

@@ -1,148 +1,471 @@
 //========================================================================================
-// AthenaK Regridding Tool - Standalone IOWrapper Implementation
+// AthenaXXX astrophysical plasma code
+// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file io_wrapper.cpp
-//  \brief Implementation of standalone IOWrapper class
+//! \brief functions that provide wrapper for MPI-IO versus serial input/output
 
-#include "io_wrapper.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <iomanip>
 #include <iostream>
-#include <cstring>
-#include <cerrno>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+#include "common.hpp"
+#include "io_wrapper.hpp"
 
 //----------------------------------------------------------------------------------------
-//! \fn int IOWrapper::Open()
-//! \brief Open a file for reading or writing
-int IOWrapper::Open(const char* filename, FileMode mode) {
-  Close(); // Close any existing file
+//! \fn int IOWrapper::Open(const char* fname, FileMode rw)
+//! \brief wrapper for {MPI_File_open} versus {std::fopen} including error check
+//! This function must not be called by multiple threads in shared memory parallel regions
 
-  const char* mode_str = (mode == FileMode::read) ? "rb" : "wb";
-  file_ = std::fopen(filename, mode_str);
-  
-  if (file_ == nullptr) {
-    SetError("Failed to open file: " + std::string(filename) + 
-             " (" + std::string(std::strerror(errno)) + ")");
-    is_open_ = false;
-    return -1;
+int IOWrapper::Open(const char* fname, FileMode rw) {
+  // open file for reads
+  if (rw == FileMode::read) {
+#if MPI_PARALLEL_ENABLED
+    int errcode = MPI_File_open(comm_, fname, MPI_MODE_RDONLY, MPI_INFO_NULL, &fh_);
+    if (errcode != MPI_SUCCESS) {
+      char msg[MPI_MAX_ERROR_STRING];
+      int resultlen;
+      MPI_Error_string(errcode, msg, &resultlen);
+      std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Input file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#else
+    if ((fh_ = std::fopen(fname,"rb")) == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Input file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#endif
+
+  // open file for writes
+  } else if (rw == FileMode::write) {
+#if MPI_PARALLEL_ENABLED
+    int errcode = MPI_File_open(comm_, fname, MPI_MODE_WRONLY | MPI_MODE_CREATE,
+                                MPI_INFO_NULL, &fh_);
+    if (errcode != MPI_SUCCESS) {
+      char msg[MPI_MAX_ERROR_STRING];
+      int resultlen;
+      MPI_Error_string(errcode, msg, &resultlen);
+      std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Output file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#else
+    if ((fh_ = std::fopen(fname,"wb")) == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Output file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#endif
+
+  // open file for append
+  } else if (rw == FileMode::append) {
+#if MPI_PARALLEL_ENABLED
+    int errcode = MPI_File_open(comm_, fname, MPI_MODE_WRONLY | MPI_MODE_APPEND,
+                                MPI_INFO_NULL, &fh_);
+    if (errcode != MPI_SUCCESS) {
+      char msg[MPI_MAX_ERROR_STRING];
+      int resultlen;
+      MPI_Error_string(errcode, msg, &resultlen);
+      std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Output file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#else
+    if ((fh_ = std::fopen(fname,"ab")) == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Output file '" << fname << "' could not be opened"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#endif
+  } else {
+    return false;
   }
 
-  is_open_ = true;
-  last_error_.clear();
-  return 0;
+  return true;
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void IOWrapper::Close()
-//! \brief Close the file
-void IOWrapper::Close() {
-  if (file_ != nullptr) {
-    std::fclose(file_);
-    file_ = nullptr;
-  }
-  is_open_ = false;
-  last_error_.clear();
-}
+//! \fn int IOWrapper::Read_bytes(void *buf, IOWrapperSizeT size, IOWrapperSizeT cnt)
+//! \brief wrapper for {MPI_File_read} versus {std::fread}.  Returns number of byte-blocks
+//! of given "size" actually read.
 
-//----------------------------------------------------------------------------------------
-//! \fn size_t IOWrapper::Read_bytes()
-//! \brief Read bytes from file
-size_t IOWrapper::Read_bytes(void* buf, size_t size, size_t count) {
-  if (!is_open_ || file_ == nullptr) {
-    SetError("File not open for reading");
+std::size_t IOWrapper::Read_bytes(void *buf, IOWrapperSizeT size, IOWrapperSizeT cnt) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read(fh_, buf, cnt*size, MPI_BYTE, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
     return 0;
   }
-
-  size_t bytes_read = std::fread(buf, size, count, file_);
-  
-  if (bytes_read != count && !std::feof(file_)) {
-    SetError("Read error: expected " + std::to_string(count) + 
-             " elements, got " + std::to_string(bytes_read));
-  }
-
-  return bytes_read * size; // Return total bytes read
+  int nread;
+  if (MPI_Get_count(&status,MPI_BYTE,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread/size;
+#else
+  return std::fread(buf,size,cnt,fh_);
+#endif
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn size_t IOWrapper::Write_bytes()  
-//! \brief Write bytes to file
-size_t IOWrapper::Write_bytes(const void* buf, size_t size, size_t count) {
-  if (!is_open_ || file_ == nullptr) {
-    SetError("File not open for writing");
+//! \fn int IOWrapper::Read_bytes_at(void *buf, IOWrapperSizeT size,
+//!                                  IOWrapperSizeT cnt, IOWrapperSizeT offset)
+//! \brief wrapper for {MPI_File_read_at} versus {std::fseek+std::fread}
+//! Returns number of byte-blocks of given "size" actually read.
+
+std::size_t IOWrapper::Read_bytes_at(void *buf, IOWrapperSizeT size,
+                                     IOWrapperSizeT cnt, IOWrapperSizeT offset) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read_at(fh_, offset, buf, cnt*size, MPI_BYTE, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
     return 0;
   }
+  int nread;
+  if (MPI_Get_count(&status,MPI_BYTE,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread/size;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  return std::fread(buf,size,cnt,fh_);
+#endif
+}
 
-  size_t bytes_written = std::fwrite(buf, size, count, file_);
-  
-  if (bytes_written != count) {
-    SetError("Write error: expected " + std::to_string(count) + 
-             " elements, wrote " + std::to_string(bytes_written));
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Read_bytes_at_all(void *buf, IOWrapperSizeT size,
+//!                                      IOWrapperSizeT cnt, IOWrapperSizeT offset)
+//! \brief wrapper for {MPI_File_read_at_all} versus {std::fseek+std::fread}
+//! Returns number of byte-blocks of given "size" actually read.
+
+std::size_t IOWrapper::Read_bytes_at_all(void *buf, IOWrapperSizeT size,
+                                         IOWrapperSizeT cnt, IOWrapperSizeT offset) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read_at_all(fh_, offset, buf, cnt*size, MPI_BYTE, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nread;
+  if (MPI_Get_count(&status,MPI_BYTE,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread/size;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  return std::fread(buf,size,cnt,fh_);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Read_Reals(void *buf, IOWrapperSizeT count)
+//! \brief wrapper for {MPI_File_read} versus {std::fread} for reading Athena Reals
+//! in parallel.  Returns number of Reals actually read.
+
+std::size_t IOWrapper::Read_Reals(void *buf, IOWrapperSizeT count) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read(fh_, buf, count, MPI_ATHENA_REAL, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nread;
+  if (MPI_Get_count(&status,MPI_ATHENA_REAL,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread;
+#else
+  return std::fread(buf,sizeof(Real),count,fh_);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Read_Reals_at(void *buf,IOWrapperSizeT cnt,IOWrapperSizeT offset)
+//! \brief wrapper for {MPI_File_read_at} versus {std::fseek+std::fread} for reading
+//!  Athena Reals in parallel.  Returns number of Reals actually read.
+
+std::size_t IOWrapper::Read_Reals_at(void *buf, IOWrapperSizeT cnt,
+                                     IOWrapperSizeT offset) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read_at(fh_, offset, buf, cnt, MPI_ATHENA_REAL, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nread;
+  if (MPI_Get_count(&status,MPI_ATHENA_REAL,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  return std::fread(buf,sizeof(Real),cnt,fh_);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Read_Reals_at_all(void *buf, IOWrapperSizeT cnt,
+//!                                      IOWrapperSizeT offset)
+//! \brief wrapper for {MPI_File_read_at_all} versus {std::fseek+std::fread} for reading
+//!  Athena Reals in parallel.  Returns number of Reals actually read.
+
+std::size_t IOWrapper::Read_Reals_at_all(void *buf, IOWrapperSizeT cnt,
+                                         IOWrapperSizeT offset) {
+#if MPI_PARALLEL_ENABLED
+  MPI_Status status;
+  int errcode = MPI_File_read_at_all(fh_, offset, buf, cnt, MPI_ATHENA_REAL, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nread;
+  if (MPI_Get_count(&status,MPI_ATHENA_REAL,&nread) == MPI_UNDEFINED) {return 0;}
+  return nread;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  return std::fread(buf,sizeof(Real),cnt,fh_);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Write_any_type()
+//! \brief wrapper for {MPI_File_write} versus {std::fwrite} for writing any type of
+//! data, specified by the mpitype argument. Returns number of data elements of given
+//! "type" actually written.
+
+std::size_t IOWrapper::Write_any_type(const void *buf, IOWrapperSizeT cnt,
+                                      std::string datatype) {
+#if MPI_PARALLEL_ENABLED
+  // set appropriate MPI_Datatype
+  MPI_Datatype mpitype;
+  if (datatype.compare("byte") == 0) {
+    mpitype = MPI_BYTE;
+  } else if (datatype.compare("int") == 0) {
+    mpitype = MPI_INT;
+  } else if (datatype.compare("Real") == 0) {
+    mpitype = MPI_ATHENA_REAL;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
   }
 
-  return bytes_written * size; // Return total bytes written
+  MPI_Status status;
+  int errcode = MPI_File_write(fh_, buf, cnt, mpitype, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nwritten;
+  if (MPI_Get_count(&status,mpitype,&nwritten) == MPI_UNDEFINED) {return 0;}
+  return nwritten;
+#else
+  if (datatype.compare("byte") == 0) {
+    return std::fwrite(buf,sizeof(char),cnt,fh_);
+  } else if (datatype.compare("int") == 0) {
+    return std::fwrite(buf,sizeof(int),cnt,fh_);
+  } else if (datatype.compare("Real") == 0) {
+    return std::fwrite(buf,sizeof(Real),cnt,fh_);
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
+    return 0;
+  }
+#endif
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Write_any_type_at()
+//! \brief wrapper for {MPI_File_write_at} versus {std::fseek+std::fwrite} for writing
+//! any type of data, at given offset. Returns number of data elements actually written.
+
+std::size_t IOWrapper::Write_any_type_at(const void *buf, IOWrapperSizeT cnt,
+                                         IOWrapperSizeT offset, std::string datatype) {
+#if MPI_PARALLEL_ENABLED
+  // set appropriate MPI_Datatype
+  MPI_Datatype mpitype;
+  if (datatype.compare("byte") == 0) {
+    mpitype = MPI_BYTE;
+  } else if (datatype.compare("int") == 0) {
+    mpitype = MPI_INT;
+  } else if (datatype.compare("Real") == 0) {
+    mpitype = MPI_ATHENA_REAL;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  MPI_Status status;
+  int errcode = MPI_File_write_at(fh_, offset, buf, cnt, mpitype, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nwritten;
+  if (MPI_Get_count(&status,mpitype,&nwritten) == MPI_UNDEFINED) {return 0;}
+  return nwritten;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  if (datatype.compare("byte") == 0) {
+    return std::fwrite(buf,sizeof(char),cnt,fh_);
+  } else if (datatype.compare("int") == 0) {
+    return std::fwrite(buf,sizeof(int),cnt,fh_);
+  } else if (datatype.compare("Real") == 0) {
+    return std::fwrite(buf,sizeof(Real),cnt,fh_);
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
+    return 0;
+  }
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Write_any_type_at_all()
+//! \brief wrapper for {MPI_File_write_at_all} versus {std::fseek+std::fwrite} for 
+//! writing any type of data, at given offset. Returns number of data elements written.
+
+std::size_t IOWrapper::Write_any_type_at_all(const void *buf, IOWrapperSizeT cnt,
+                                             IOWrapperSizeT offset, std::string datatype) {
+#if MPI_PARALLEL_ENABLED
+  // set appropriate MPI_Datatype
+  MPI_Datatype mpitype;
+  if (datatype.compare("byte") == 0) {
+    mpitype = MPI_BYTE;
+  } else if (datatype.compare("int") == 0) {
+    mpitype = MPI_INT;
+  } else if (datatype.compare("Real") == 0) {
+    mpitype = MPI_ATHENA_REAL;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  MPI_Status status;
+  int errcode = MPI_File_write_at_all(fh_, offset, buf, cnt, mpitype, &status);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return 0;
+  }
+  int nwritten;
+  if (MPI_Get_count(&status,mpitype,&nwritten) == MPI_UNDEFINED) {return 0;}
+  return nwritten;
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+  if (datatype.compare("byte") == 0) {
+    return std::fwrite(buf,sizeof(char),cnt,fh_);
+  } else if (datatype.compare("int") == 0) {
+    return std::fwrite(buf,sizeof(int),cnt,fh_);
+  } else if (datatype.compare("Real") == 0) {
+    return std::fwrite(buf,sizeof(Real),cnt,fh_);
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Unrecognized datatype= " << datatype << std::endl;
+    std::exit(EXIT_FAILURE);
+    return 0;
+  }
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Close()
+//! \brief wrapper for {MPI_File_close} versus {std::fclose}
+
+int IOWrapper::Close() {
+#if MPI_PARALLEL_ENABLED
+  int errcode = MPI_File_close(&fh_);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return false;
+  }
+#else
+  std::fclose(fh_);
+#endif
+  return true;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int IOWrapper::Seek(IOWrapperSizeT offset)
+//! \brief wrapper for {MPI_File_seek} versus {std::fseek}
+
+int IOWrapper::Seek(IOWrapperSizeT offset) {
+#if MPI_PARALLEL_ENABLED
+  int errcode = MPI_File_seek(fh_, offset, MPI_SEEK_SET);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
+    return false;
+  }
+#else
+  std::fseek(fh_, offset, SEEK_SET);
+#endif
+  return true;
+}
+
 
 //----------------------------------------------------------------------------------------
 //! \fn IOWrapperSizeT IOWrapper::GetPosition()
-//! \brief Get current file position
+//! \brief wrapper for {MPI_File_get_position} versus {std::ftell}
+
 IOWrapperSizeT IOWrapper::GetPosition() {
-  if (!is_open_ || file_ == nullptr) {
-    SetError("File not open");
+#if MPI_PARALLEL_ENABLED
+  MPI_Offset disp;
+  int errcode = MPI_File_get_position(fh_, &disp);
+  if (errcode != MPI_SUCCESS) {
+    char msg[MPI_MAX_ERROR_STRING];
+    int resultlen;
+    MPI_Error_string(errcode, msg, &resultlen);
+    std::cout << "MPI Error: " << std::string(msg, resultlen) << std::endl;
     return 0;
   }
-
-  long pos = std::ftell(file_);
-  if (pos == -1L) {
-    SetError("Failed to get file position");
-    return 0;
-  }
-
-  return static_cast<IOWrapperSizeT>(pos);
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn int IOWrapper::Seek()
-//! \brief Seek to position from beginning of file
-int IOWrapper::Seek(IOWrapperSizeT pos) {
-  if (!is_open_ || file_ == nullptr) {
-    SetError("File not open");
-    return -1;
-  }
-
-  int result = std::fseek(file_, static_cast<long>(pos), SEEK_SET);
-  if (result != 0) {
-    SetError("Failed to seek to position " + std::to_string(pos));
-  }
-
-  return result;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn int IOWrapper::SeekFromEnd()
-//! \brief Seek to position from end of file
-int IOWrapper::SeekFromEnd(IOWrapperSizeT offset) {
-  if (!is_open_ || file_ == nullptr) {
-    SetError("File not open");
-    return -1;
-  }
-
-  int result = std::fseek(file_, -static_cast<long>(offset), SEEK_END);
-  if (result != 0) {
-    SetError("Failed to seek from end with offset " + std::to_string(offset));
-  }
-
-  return result;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn bool IOWrapper::HasError()
-//! \brief Check if there are any errors
-bool IOWrapper::HasError() const {
-  return !last_error_.empty();
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn std::string IOWrapper::GetLastError()
-//! \brief Get the last error message
-std::string IOWrapper::GetLastError() const {
-  return last_error_;
+  return disp;
+#else
+  return ftell(fh_);
+#endif
 }

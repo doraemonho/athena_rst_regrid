@@ -1,584 +1,522 @@
-//========================================================================================
-// AthenaK Regridding Tool - RestartWriter Implementation
-// Licensed under the 3-clause BSD License (the "LICENSE")
-//========================================================================================
-//! \file restart_writer.cpp
-//  \brief Implementation of RestartWriter class
-
 #include "restart_writer.hpp"
+#include "upscaler.hpp"
+#include "parameter_parser.hpp"
+#include "simple_parameter_input.hpp"
 #include <iostream>
-#include <iomanip>
 #include <sstream>
-#include <algorithm>
-#include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::WriteRestartFile()
-//! \brief Main function to write regridded restart file
-bool RestartWriter::WriteRestartFile(const std::string& output_filename,
-                                    const RestartData& input_data,
-                                    const NewMeshData& mesh_data,
-                                    const InterpolatedData& physics_data) {
-  SetError("");
-  
-  std::cout << "Writing regridded restart file: " << output_filename << std::endl;
-  
-  // Validate input data
-  if (!ValidateOutputData(mesh_data, physics_data)) {
-    return false;
-  }
-  
-  // Create output directory if it doesn't exist
-  size_t last_slash = output_filename.find_last_of("/");
-  if (last_slash != std::string::npos) {
-    std::string dir_name = output_filename.substr(0, last_slash);
-    if (!dir_name.empty()) {
-      mkdir(dir_name.c_str(), 0775);
-    }
-  }
-  
-  // Open the output file
-  IOWrapper file;
-  if (file.Open(output_filename.c_str(), IOWrapper::FileMode::write) != 0) {
-    SetError("Failed to create output file: " + output_filename + " (" + file.GetLastError() + ")");
-    return false;
-  }
-  
-  // Write file sections in the same order as AthenaK
-  if (!WriteHeader(file, input_data, mesh_data)) {
-    file.Close();
-    return false;
-  }
-  
-  if (!WriteMeshStructure(file, mesh_data)) {
-    file.Close();
-    return false;
-  }
-  
-  if (!WriteInternalState(file, input_data)) {
-    file.Close();
-    return false;
-  }
-  
-  if (!WritePhysicsData(file, mesh_data, physics_data)) {
-    file.Close();
-    return false;
-  }
-  
-  file.Close();
-  
-  // Validate the written file
-  if (!ValidateFileStructure(output_filename)) {
-    return false;
-  }
-  
-  std::cout << "Successfully wrote regridded restart file with " 
-            << mesh_data.nmb_total_new << " MeshBlocks" << std::endl;
-  
-  return true;
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+#endif
+
+// RestartWriter implementation
+RestartWriter::RestartWriter(RestartReader& reader, Upscaler& upscaler) 
+    : reader_(reader), upscaler_(upscaler), header_offset_(0) {
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::WriteHeader()
-//! \brief Write restart file header with updated parameters
-bool RestartWriter::WriteHeader(IOWrapper& file, const RestartData& input_data, 
-                               const NewMeshData& mesh_data) {
-  // Generate updated input parameters
-  std::string updated_params = GenerateUpdatedInputParameters(input_data, mesh_data);
-  
-  // Write parameter string
-  if (file.Write_bytes(updated_params.c_str(), 1, updated_params.size()) != 
-      updated_params.size()) {
-    SetError("Failed to write input parameters");
-    return false;
-  }
-  
-  // Write mesh information
-  
-  // Write exactly like AthenaK does
-  if (file.Write_any_type(&mesh_data.nmb_total_new, sizeof(int), "byte") != sizeof(int)) {
-    SetError("Failed to write nmb_total");
-    return false;
-  }
-  
-  if (file.Write_any_type(&mesh_data.root_level_new, sizeof(int), "byte") != sizeof(int)) {
-    SetError("Failed to write root_level");
-    return false;
-  }
-  
-  if (file.Write_any_type(&mesh_data.mesh_size_new, sizeof(RegionSize), "byte") != sizeof(RegionSize)) {
-    SetError("Failed to write mesh_size");
-    return false;
-  }
-  
-  if (file.Write_any_type(&mesh_data.mesh_indcs_new, sizeof(RegionIndcs), "byte") != 
-      sizeof(RegionIndcs)) {
-    SetError("Failed to write mesh_indcs");
-    return false;
-  }
-  
-  if (file.Write_any_type(&mesh_data.mb_indcs_new, sizeof(RegionIndcs), "byte") != 
-      sizeof(RegionIndcs)) {
-    SetError("Failed to write mb_indcs");
-    return false;
-  }
-  
-  // Write time information (optionally updated)
-  Real time_to_write = update_time_ ? new_time_ : input_data.time;
-  if (file.Write_any_type(&time_to_write, sizeof(Real), "byte") != sizeof(Real)) {
-    SetError("Failed to write time");
-    return false;
-  }
-  
-  if (file.Write_any_type(&mesh_data.dt_new, sizeof(Real), "byte") != sizeof(Real)) {
-    SetError("Failed to write dt");
-    return false;
-  }
-  
-  if (file.Write_any_type(&input_data.ncycle, sizeof(int), "byte") != sizeof(int)) {
-    SetError("Failed to write ncycle");
-    return false;
-  }
-  
-  return true;
+RegionSize RestartWriter::GetFineMeshSize() const { 
+    return upscaler_.fine_mesh_size_; 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::WriteMeshStructure()
-//! \brief Write MeshBlock structure information
-bool RestartWriter::WriteMeshStructure(IOWrapper& file, const NewMeshData& mesh_data) {
-  // Write logical locations
-  size_t lloc_bytes = mesh_data.nmb_total_new * sizeof(LogicalLocation);
-            
-  if (file.Write_any_type(&mesh_data.lloc_eachmb_new[0], lloc_bytes, "byte") != lloc_bytes) {
-    SetError("Failed to write logical locations");
-    return false;
-  }
-  
-  // Write costs
-  size_t cost_bytes = mesh_data.nmb_total_new * sizeof(float);
-  if (file.Write_any_type(&mesh_data.cost_eachmb_new[0], cost_bytes, "byte") != cost_bytes) {
-    SetError("Failed to write MeshBlock costs");
-    return false;
-  }
-  
-  return true;
+RegionIndcs RestartWriter::GetFineMeshIndcs() const { 
+    return upscaler_.fine_mesh_indcs_; 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::WriteInternalState()
-//! \brief Write internal state of physics modules
-bool RestartWriter::WriteInternalState(IOWrapper& file, const RestartData& input_data) {
-  // Write Z4c information if present
-  if (input_data.has_z4c) {
-    if (file.Write_any_type(&input_data.z4c_last_output_time, sizeof(Real), "byte") != 
-        sizeof(Real)) {
-      SetError("Failed to write Z4c last output time");
-      return false;
-    }
-  }
-  
-  // Write puncture positions if present
-  if (input_data.has_punctures) {
-    size_t punct_bytes = input_data.puncture_positions.size() * sizeof(Real);
-    if (file.Write_any_type(input_data.puncture_positions.data(), punct_bytes, "byte") != 
-        punct_bytes) {
-      SetError("Failed to write puncture positions");
-      return false;
-    }
-  }
-  
-  // Write turbulence RNG state if present (exactly like AthenaK does)
-  if (input_data.has_turb) {
-    if (file.Write_any_type(&input_data.turb_rng_state, sizeof(RNG_State), "byte") != 
-        sizeof(RNG_State)) {
-      SetError("Failed to write turbulence RNG state");
-      return false;
-    }
-  }
-  
-  return true;
+RegionIndcs RestartWriter::GetFineMBIndcs() const { 
+    return upscaler_.fine_mb_indcs_; 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::WritePhysicsData()
-//! \brief Write physics data exactly like AthenaK: one MeshBlock at a time with interleaved format
-bool RestartWriter::WritePhysicsData(IOWrapper& file, const NewMeshData& mesh_data,
-                                    const InterpolatedData& physics_data) {
-  // Calculate total data size per MeshBlock (exactly like AthenaK does it)
-  IOWrapperSizeT data_size = 0;
-  int nout1 = physics_data.nout1;
-  int nout2 = physics_data.nout2; 
-  int nout3 = physics_data.nout3;
-  
-  if (physics_data.nhydro > 0) {
-    data_size += nout1*nout2*nout3*physics_data.nhydro*sizeof(Real); // hydro u0
-  }
-  if (physics_data.nmhd > 0) {
-    data_size += nout1*nout2*nout3*physics_data.nmhd*sizeof(Real);   // mhd u0
-    data_size += (nout1+1)*nout2*nout3*sizeof(Real);                // mhd b0.x1f
-    data_size += nout1*(nout2+1)*nout3*sizeof(Real);                // mhd b0.x2f  
-    data_size += nout1*nout2*(nout3+1)*sizeof(Real);                // mhd b0.x3f
-  }
-  if (physics_data.nrad > 0) {
-    data_size += nout1*nout2*nout3*physics_data.nrad*sizeof(Real);   // radiation i0
-  }
-  if (!physics_data.force_data.empty()) {
-    data_size += nout1*nout2*nout3*3*sizeof(Real);                  // forcing
-  }
-  if (physics_data.nz4c > 0) {
-    data_size += nout1*nout2*nout3*physics_data.nz4c*sizeof(Real);  // z4c u0
-  }
-  if (physics_data.nadm > 0) {
-    data_size += nout1*nout2*nout3*physics_data.nadm*sizeof(Real);  // adm u_adm
-  }
-  
-  // Write the data size (this is written once, like AthenaK does)
-  if (file.Write_any_type(&data_size, sizeof(IOWrapperSizeT), "byte") != sizeof(IOWrapperSizeT)) {
-    SetError("Failed to write data size");
-    return false;
-  }
-  
-  // Write data in AthenaK's EXACT MeshBlock-interleaved format matching restart.cpp:284-570
-  // Each MeshBlock gets ALL its physics data written before moving to next MeshBlock
-  
-  // MeshBlock-interleaved format: MB0[hydro+mhd+b1f+b2f+b3f+turb], MB1[...], MB2[...]
-  for (int mb = 0; mb < physics_data.nmb_total; mb++) {
-    
-    // 1. Write hydro data for this MeshBlock (if present)
-    if (physics_data.nhydro > 0) {
-      size_t mb_start = mb * physics_data.nhydro * nout1 * nout2 * nout3;
-      size_t mb_bytes = physics_data.nhydro * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.hydro_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write hydro data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-    
-    // 2. Write MHD conserved data for this MeshBlock (if present)
-    if (physics_data.nmhd > 0) {
-      size_t mb_start = mb * physics_data.nmhd * nout1 * nout2 * nout3;
-      size_t mb_bytes = physics_data.nmhd * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.mhd_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write MHD data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-      
-      // 3. Write B-field components for this MeshBlock: B1f, then B2f, then B3f
-      
-      // B1f for this MeshBlock
-      size_t b1f_start = mb * (nout1+1) * nout2 * nout3;
-      size_t b1f_bytes = (nout1+1) * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.mhd_b1f_data.data() + b1f_start, 1, b1f_bytes) != b1f_bytes) {
-        SetError("Failed to write B1f data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-      
-      // B2f for this MeshBlock
-      size_t b2f_start = mb * nout1 * (nout2+1) * nout3;
-      size_t b2f_bytes = nout1 * (nout2+1) * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.mhd_b2f_data.data() + b2f_start, 1, b2f_bytes) != b2f_bytes) {
-        SetError("Failed to write B2f data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-      
-      // B3f for this MeshBlock
-      size_t b3f_start = mb * nout1 * nout2 * (nout3+1);
-      size_t b3f_bytes = nout1 * nout2 * (nout3+1) * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.mhd_b3f_data.data() + b3f_start, 1, b3f_bytes) != b3f_bytes) {
-        SetError("Failed to write B3f data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-    
-    // 4. Write radiation data for this MeshBlock (if present)
-    if (physics_data.nrad > 0) {
-      size_t mb_start = mb * physics_data.nrad * nout1 * nout2 * nout3;
-      size_t mb_bytes = physics_data.nrad * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.rad_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write radiation data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-    
-    // 5. Write turbulence forcing data for this MeshBlock (if present)
-    if (!physics_data.force_data.empty()) {
-      size_t mb_start = mb * 3 * nout1 * nout2 * nout3;
-      size_t mb_bytes = 3 * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.force_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write turbulence data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-    
-    // 6. Write Z4c data for this MeshBlock (if present)
-    if (physics_data.nz4c > 0) {
-      size_t mb_start = mb * physics_data.nz4c * nout1 * nout2 * nout3;
-      size_t mb_bytes = physics_data.nz4c * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.z4c_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write Z4c data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-    
-    // 7. Write ADM data for this MeshBlock (if present)
-    if (physics_data.nadm > 0) {
-      size_t mb_start = mb * physics_data.nadm * nout1 * nout2 * nout3;
-      size_t mb_bytes = physics_data.nadm * nout1 * nout2 * nout3 * sizeof(Real);
-      
-      if (file.Write_bytes(physics_data.adm_data.data() + mb_start, 1, mb_bytes) != mb_bytes) {
-        SetError("Failed to write ADM data for MeshBlock " + std::to_string(mb));
-        return false;
-      }
-    }
-  }
-  
-  return true;
+int RestartWriter::GetFineNMBTotal() const { 
+    return upscaler_.fine_nmb_total_; 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn std::string RestartWriter::GenerateUpdatedInputParameters()
-//! \brief Generate updated input parameter string with new resolution
-std::string RestartWriter::GenerateUpdatedInputParameters(const RestartData& input_data,
-                                                          const NewMeshData& mesh_data) {
-  std::string updated_params = input_data.input_params;
-  
-  // Update mesh resolution
-  UpdateParameterValue(updated_params, "mesh", "nx1", 
-                      std::to_string(mesh_data.mesh_indcs_new.nx1));
-  UpdateParameterValue(updated_params, "mesh", "nx2", 
-                      std::to_string(mesh_data.mesh_indcs_new.nx2));
-  UpdateParameterValue(updated_params, "mesh", "nx3", 
-                      std::to_string(mesh_data.mesh_indcs_new.nx3));
-  
-  // Update file number if specified
-  if (output_file_number_ > 0) {
-    UpdateParameterValue(updated_params, "output1", "file_number", 
-                        std::to_string(output_file_number_));
-  }
-  
-  // Restore the PAR_DUMP footer that was stripped during reading
-  updated_params += "#------------------------- PAR_DUMP -------------------------\n";
-  updated_params += "<par_end>\n";
-  
-  return updated_params;
+const std::vector<LogicalLocation>& RestartWriter::GetFineLlocEachMB() const { 
+    return upscaler_.fine_lloc_eachmb_; 
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::UpdateParameterValue()
-//! \brief Update a specific parameter value in the parameter string
-bool RestartWriter::UpdateParameterValue(std::string& params, const std::string& section,
-                                        const std::string& key, const std::string& value) {
-  std::istringstream iss(params);
-  std::ostringstream oss;
-  std::string line;
-  bool in_section = false;
-  bool found_key = false;
-  
-  while (std::getline(iss, line)) {
-    // Check if we're entering the target section
-    if (line.find("<" + section + ">") != std::string::npos) {
-      in_section = true;
-      oss << line << "\n";
-      continue;
+const std::vector<float>& RestartWriter::GetFineCostEachMB() const { 
+    return upscaler_.fine_cost_eachmb_; 
+}
+
+const Real* RestartWriter::GetFineHydroData() const { 
+    return upscaler_.fine_hydro_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineMHDData() const { 
+    return upscaler_.fine_mhd_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineX1FData() const { 
+    return upscaler_.fine_x1f_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineX2FData() const { 
+    return upscaler_.fine_x2f_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineX3FData() const { 
+    return upscaler_.fine_x3f_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineRadData() const { 
+    return upscaler_.fine_rad_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineTurbData() const { 
+    return upscaler_.fine_turb_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineZ4cData() const { 
+    return upscaler_.fine_z4c_data_.data(); 
+}
+
+const Real* RestartWriter::GetFineADMData() const { 
+    return upscaler_.fine_adm_data_.data(); 
+}
+
+bool RestartWriter::WriteRestartFile(const std::string& filename) {
+    // All ranks must call Open() for MPI_File_open() to work (collective operation)
+    if (!file_.Open(filename.c_str(), IOWrapper::FileMode::write)) {
+        std::cerr << "ERROR: Cannot create restart file: " << filename << std::endl;
+        return false;
     }
     
-    // Check if we're leaving the section (explicit closing tag or new section)
-    if (in_section && (line.find("</") != std::string::npos || 
-                       (line.find("<") != std::string::npos && 
-                        line.find("<" + section + ">") == std::string::npos))) {
-      // If we didn't find the key, add it before leaving the section
-      if (!found_key) {
-        oss << key << " = " << value << "\n";
-      }
-      in_section = false;
-      oss << line << "\n";
-      continue;
+    // Follow AthenaK's exact writing sequence
+    if (!WriteParameterData()) {
+        std::cerr << "ERROR: Failed to write parameter data" << std::endl;
+        return false;
     }
     
-    // Check if this is the key we want to update (must be at start of line)
-    if (in_section) {
-      // Find the parameter name at the start of the line (ignoring whitespace)
-      size_t start = line.find_first_not_of(" \t");
-      if (start != std::string::npos && 
-          line.substr(start, key.length()) == key &&
-          (start + key.length() >= line.length() || 
-           !std::isalnum(line[start + key.length()]))) {
-        // Check if followed by = or whitespace
-        size_t after_key = start + key.length();
-        if (after_key < line.length() && 
-            (line[after_key] == '=' || std::isspace(line[after_key]))) {
-          // Find the equals sign and value position
-          size_t eq_pos = line.find('=', after_key);
-          if (eq_pos != std::string::npos) {
-            // Find the end of the value (before any comment)
-            size_t value_start = line.find_first_not_of(" \t", eq_pos + 1);
-            size_t comment_pos = line.find('#', value_start);
-            
-            // Preserve original formatting: keep everything before value and after value
-            std::string prefix = line.substr(0, value_start);
-            std::string suffix = (comment_pos != std::string::npos) ? 
-                               line.substr(comment_pos) : "";
-            
-            // Reconstruct line with new value and proper spacing
-            if (!suffix.empty()) {
-              oss << prefix << value << "       " << suffix << "\n";
-            } else {
-              oss << prefix << value << "\n";
-            }
-            found_key = true;
-            continue;
-          }
+    if (!WriteHeaderData()) {
+        std::cerr << "ERROR: Failed to write header data" << std::endl;
+        return false;
+    }
+    
+    if (!WriteMeshBlockLists()) {
+        std::cerr << "ERROR: Failed to write MeshBlock lists" << std::endl;
+        return false;
+    }
+    
+    if (!WriteInternalState()) {
+        std::cerr << "ERROR: Failed to write internal state data" << std::endl;
+        return false;
+    }
+    
+    if (!WritePhysicsData()) {
+        std::cerr << "ERROR: Failed to write physics data" << std::endl;
+        return false;
+    }
+    
+    file_.Close();
+    return true;
+}
+
+bool RestartWriter::WriteParameterData() {
+    if (reader_.GetMyRank() == 0) {
+        std::cout << "WriteParameterData: Writing upscaled parameter data" << std::endl;
+        
+        std::string original_params = reader_.GetParameterString();
+        std::cout << "  Original parameter string size: " << original_params.size() << " bytes" << std::endl;
+        
+        // Update mesh parameters for upscaling (double the resolution) using string replacement
+        // This preserves the original formatting, trailing whitespace, and PAR_DUMP line
+        RegionIndcs fine_indcs = GetFineMeshIndcs();
+        
+        // Create modified parameter string by direct replacement
+        std::string param_string = original_params;
+        
+        // Find the <mesh> section for targeted replacement
+        size_t mesh_start = param_string.find("<mesh>");
+        size_t mesh_end = param_string.find("<meshblock>");
+        
+        if (mesh_start == std::string::npos) {
+            std::cerr << "ERROR: Could not find <mesh> section in parameters" << std::endl;
+            return false;
         }
-      }
+        if (mesh_end == std::string::npos) {
+            mesh_end = param_string.find("<", mesh_start + 6); // Find next section
+        }
+        
+        
+        // Helper lambda to replace nx values while preserving exact formatting
+        auto replace_nx = [&](const std::string& param_name, int new_value) -> bool {
+            // Look for pattern "nx1    = 64" in mesh section only
+            std::string search_pattern = param_name + "    = ";
+            size_t pos = param_string.find(search_pattern, mesh_start);
+            
+            
+            if (pos != std::string::npos && pos < mesh_end) {
+                size_t value_start = pos + search_pattern.length();
+                size_t value_end = param_string.find_first_of(" \t", value_start);
+                if (value_end == std::string::npos || value_end > mesh_end) {
+                    value_end = param_string.find('\n', value_start);
+                }
+                
+                std::string old_value = param_string.substr(value_start, value_end - value_start);
+                param_string.replace(value_start, value_end - value_start, std::to_string(new_value));
+                return true;
+            }
+            std::cerr << "    WARNING: Could not find " << param_name << " in mesh section" << std::endl;
+            return false;
+        };
+        
+        // Update the mesh parameters (only in <mesh> section, not <meshblock>)
+        replace_nx("nx1", fine_indcs.nx1);
+        replace_nx("nx2", fine_indcs.nx2);
+        replace_nx("nx3", fine_indcs.nx3);
+        
+        // Note: We do NOT update parameters in <meshblock> as the meshblock size remains constant
+        // The upscaling maintains the same meshblock size but creates more meshblocks
+        std::cout << "  Modified parameter string size: " << param_string.size() << " bytes" << std::endl;
+        
+        
+        // Write the updated parameter string (preserves original format including <par_end>\n)
+        IOWrapperSizeT bytes_written = file_.Write_any_type(param_string.c_str(), 
+                                                           param_string.size(), "byte");
+        if (bytes_written != param_string.size()) {
+            std::cerr << "ERROR: Failed to write parameter data (wrote " << bytes_written 
+                      << " bytes, expected " << param_string.size() << ")" << std::endl;
+            return false;
+        }
+        
+        // Store the header offset
+        header_offset_ = file_.GetPosition();
+        std::cout << "  Header offset set to: " << header_offset_ << std::endl;
     }
     
-    // Copy line as-is
-    oss << line << "\n";
-  }
-  
-  params = oss.str();
-  return found_key || !in_section; // Success if found or if section didn't exist
+#if MPI_PARALLEL_ENABLED
+    // Ensure all ranks wait for rank 0 to finish writing parameters
+    MPI_Barrier(MPI_COMM_WORLD);
+    // Broadcast header offset to all ranks
+    MPI_Bcast(&header_offset_, sizeof(IOWrapperSizeT), MPI_BYTE, 0, MPI_COMM_WORLD);
+#endif
+    
+    return true;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn IOWrapperSizeT RestartWriter::CalculateDataSize()
-//! \brief Calculate total size of physics data to be written
-IOWrapperSizeT RestartWriter::CalculateDataSize(const NewMeshData& mesh_data,
-                                               const InterpolatedData& physics_data) const {
-  int nout1 = physics_data.nout1;
-  int nout2 = physics_data.nout2;
-  int nout3 = physics_data.nout3;
-  
-  // Per MeshBlock data size (AthenaK format)
-  IOWrapperSizeT mb_data_size = 0;
-  
-  if (physics_data.nhydro > 0) {
-    IOWrapperSizeT hydro_size = nout1 * nout2 * nout3 * physics_data.nhydro * sizeof(Real);
-    mb_data_size += hydro_size;
-  }
-  
-  if (physics_data.nmhd > 0) {
-    IOWrapperSizeT mhd_cons = nout1 * nout2 * nout3 * physics_data.nmhd * sizeof(Real);
-    IOWrapperSizeT b1f_size = (nout1 + 1) * nout2 * nout3 * sizeof(Real);
-    IOWrapperSizeT b2f_size = nout1 * (nout2 + 1) * nout3 * sizeof(Real);
-    IOWrapperSizeT b3f_size = nout1 * nout2 * (nout3 + 1) * sizeof(Real);
+bool RestartWriter::WriteHeaderData() {
+    if (reader_.GetMyRank() == 0) {
+        // Write header data following AthenaK format
+        int fine_nmb_total = GetFineNMBTotal();
+        int root_level = reader_.GetRootLevel() + 1;  // Root level increases by 1 when doubling resolution
+        RegionSize fine_mesh_size = GetFineMeshSize();
+        RegionIndcs fine_mesh_indcs = GetFineMeshIndcs();
+        RegionIndcs fine_mb_indcs = GetFineMBIndcs();
+        Real time = reader_.GetTime();
+        Real dt = reader_.GetDt();  // Keep original timestep - AthenaK will adjust if needed
+        int ncycle = reader_.GetNCycle();
+        
+        // Debug output
+        std::cout << "Writing header data:" << std::endl;
+        std::cout << "  fine_nmb_total = " << fine_nmb_total << std::endl;
+        std::cout << "  root_level = " << root_level << " (original was " << reader_.GetRootLevel() << ")" << std::endl;
+        std::cout << "  fine_mesh_indcs.nx1 = " << fine_mesh_indcs.nx1 << std::endl;
+        
+        // Debug: Check file position before writing
+        IOWrapperSizeT pos_before = file_.GetPosition();
+        std::cout << "  File position before header write: " << pos_before << std::endl;
+        
+        IOWrapperSizeT bytes_written;
+        bytes_written = file_.Write_any_type(&fine_nmb_total, sizeof(int), "byte");
+        std::cout << "  Wrote nmb_total: " << bytes_written << " bytes" << std::endl;
+        
+        bytes_written = file_.Write_any_type(&root_level, sizeof(int), "byte");
+        std::cout << "  Wrote root_level: " << bytes_written << " bytes" << std::endl;
+        file_.Write_any_type(&fine_mesh_size, sizeof(RegionSize), "byte");
+        file_.Write_any_type(&fine_mesh_indcs, sizeof(RegionIndcs), "byte");
+        file_.Write_any_type(&fine_mb_indcs, sizeof(RegionIndcs), "byte");
+        file_.Write_any_type(&time, sizeof(Real), "byte");
+        file_.Write_any_type(&dt, sizeof(Real), "byte");
+        file_.Write_any_type(&ncycle, sizeof(int), "byte");
+    }
     
-    mb_data_size += mhd_cons + b1f_size + b2f_size + b3f_size;
-  }
-  
-  if (physics_data.nrad > 0) {
-    mb_data_size += nout1 * nout2 * nout3 * physics_data.nrad * sizeof(Real);
-  }
-  
-  // Only include turbulence data if it was actually present in the original file
-  if (!physics_data.force_data.empty()) {
-    IOWrapperSizeT force_size = nout1 * nout2 * nout3 * physics_data.nforce * sizeof(Real);
-    mb_data_size += force_size;
-  }
-  
-  if (physics_data.nz4c > 0) {
-    mb_data_size += nout1 * nout2 * nout3 * physics_data.nz4c * sizeof(Real);
-  }
-  
-  if (physics_data.nadm > 0) {
-    mb_data_size += nout1 * nout2 * nout3 * physics_data.nadm * sizeof(Real);
-  }
-  
-  return mb_data_size;
+#if MPI_PARALLEL_ENABLED
+    // Ensure all ranks wait for rank 0 to finish writing header
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+    
+    return true;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::ValidateOutputData()
-//! \brief Validate output data before writing
-bool RestartWriter::ValidateOutputData(const NewMeshData& mesh_data,
-                                      const InterpolatedData& physics_data) const {
-  // Check mesh data consistency
-  if (mesh_data.nmb_total_new <= 0) {
-    SetError("Invalid number of output MeshBlocks");
-    return false;
-  }
-  
-  if (mesh_data.lloc_eachmb_new.size() != static_cast<size_t>(mesh_data.nmb_total_new)) {
-    SetError("Inconsistent logical location array size");
-    return false;
-  }
-  
-  if (mesh_data.cost_eachmb_new.size() != static_cast<size_t>(mesh_data.nmb_total_new)) {
-    SetError("Inconsistent cost array size");
-    return false;
-  }
-  
-  // Check physics data consistency
-  if (physics_data.nmb_total != mesh_data.nmb_total_new) {
-    SetError("Physics data MeshBlock count doesn't match mesh data");
-    return false;
-  }
-  
-  // Check array sizes for each physics module
-  if (physics_data.nmhd > 0) {
-    size_t expected_mhd = physics_data.nmb_total * physics_data.nmhd * 
-                         physics_data.nout1 * physics_data.nout2 * physics_data.nout3;
-    if (physics_data.mhd_data.size() != expected_mhd) {
-      SetError("Inconsistent MHD data array size");
-      return false;
+bool RestartWriter::WriteMeshBlockLists() {
+    if (reader_.GetMyRank() == 0) {
+        const std::vector<LogicalLocation>& fine_llocs = GetFineLlocEachMB();
+        const std::vector<float>& fine_costs = GetFineCostEachMB();
+        int fine_nmb_total = GetFineNMBTotal();
+        
+        file_.Write_any_type(fine_llocs.data(), fine_nmb_total * sizeof(LogicalLocation), "byte");
+        file_.Write_any_type(fine_costs.data(), fine_nmb_total * sizeof(float), "byte");
     }
     
-    size_t expected_b1f = physics_data.nmb_total * physics_data.nout3 * 
-                         physics_data.nout2 * (physics_data.nout1 + 1);
-    if (physics_data.mhd_b1f_data.size() != expected_b1f) {
-      SetError("Inconsistent B1f data array size");
-      return false;
-    }
-    
-    size_t expected_b2f = physics_data.nmb_total * physics_data.nout3 * 
-                         (physics_data.nout2 + 1) * physics_data.nout1;
-    if (physics_data.mhd_b2f_data.size() != expected_b2f) {
-      SetError("Inconsistent B2f data array size");
-      return false;
-    }
-    
-    size_t expected_b3f = physics_data.nmb_total * (physics_data.nout3 + 1) * 
-                         physics_data.nout2 * physics_data.nout1;
-    if (physics_data.mhd_b3f_data.size() != expected_b3f) {
-      SetError("Inconsistent B3f data array size");
-      return false;
-    }
-  }
-  
-  return true;
+    return true;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn bool RestartWriter::ValidateFileStructure()
-//! \brief Validate the written file structure
-bool RestartWriter::ValidateFileStructure(const std::string& filename) const {
-  // Try to reopen the file to check it was written correctly
-  IOWrapper test_file;
-  if (test_file.Open(filename.c_str(), IOWrapper::FileMode::read) != 0) {
-    SetError("Cannot reopen written file for validation");
-    return false;
-  }
-  
-  // Read a few bytes to check file is accessible
-  char buffer[1024];
-  size_t bytes_read = test_file.Read_bytes(buffer, 1, sizeof(buffer));
-  test_file.Close();
-  
-  if (bytes_read == 0) {
-    SetError("Written file appears to be empty or corrupted");
-    return false;
-  }
-  
-  return true;
+bool RestartWriter::WriteInternalState() {
+    if (reader_.GetMyRank() == 0) {
+        const PhysicsConfig& phys_config = reader_.GetPhysicsConfig();
+        
+        // Write internal state data following AthenaK format (src/outputs/restart.cpp:219-235)
+        
+        // Write Z4c last output time if present
+        if (phys_config.has_z4c) {
+            Real last_output_time = reader_.GetZ4cLastOutputTime();
+            file_.Write_any_type(&last_output_time, sizeof(Real), "byte");
+        }
+        
+        // Write compact object tracker data if present
+        if (phys_config.nco > 0) {
+            const std::vector<Real>& tracker_data = reader_.GetTrackerData();
+            file_.Write_any_type(tracker_data.data(), tracker_data.size() * sizeof(Real), "byte");
+        }
+        
+        // Write turbulence RNG state if present
+        if (phys_config.has_turbulence) {
+            const RNG_State& rng_state = reader_.GetRNGState();
+            file_.Write_any_type(&rng_state, sizeof(RNG_State), "byte");
+        }
+    }
+    
+#if MPI_PARALLEL_ENABLED
+    // Ensure all ranks wait for rank 0 to finish writing internal state
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+    
+    return true;
+}
+
+bool RestartWriter::WritePhysicsData() {
+    const PhysicsConfig& phys_config = reader_.GetPhysicsConfig();
+    RegionIndcs mb_indcs = GetFineMBIndcs();
+    int fine_nmb_total = GetFineNMBTotal();
+    
+    int nx1 = mb_indcs.nx1;
+    int nx2 = mb_indcs.nx2;
+    int nx3 = mb_indcs.nx3;
+    int ng = mb_indcs.ng;
+    
+    // Total cells including ghost zones
+    int nout1 = nx1 + 2*ng;
+    int nout2 = (nx2 > 1) ? nx2 + 2*ng : 1;
+    int nout3 = (nx3 > 1) ? nx3 + 2*ng : 1;
+    
+    // Calculate data size per meshblock
+    IOWrapperSizeT data_size = 0;
+    if (phys_config.has_hydro) {
+        data_size += nout1*nout2*nout3*phys_config.nhydro*sizeof(Real);
+    }
+    if (phys_config.has_mhd) {
+        data_size += nout1*nout2*nout3*phys_config.nmhd*sizeof(Real);   // mhd u0
+        data_size += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
+        data_size += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
+        data_size += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+    }
+    if (phys_config.has_radiation) {
+        data_size += nout1*nout2*nout3*phys_config.nrad*sizeof(Real);
+    }
+    if (phys_config.has_turbulence) {
+        data_size += nout1*nout2*nout3*phys_config.nforce*sizeof(Real);
+    }
+    if (phys_config.has_z4c) {
+        data_size += nout1*nout2*nout3*phys_config.nz4c*sizeof(Real);
+    } else if (phys_config.has_adm) {
+        data_size += nout1*nout2*nout3*phys_config.nadm*sizeof(Real);
+    }
+    
+    // Write data size
+    if (reader_.GetMyRank() == 0) {
+        file_.Write_any_type(&data_size, sizeof(IOWrapperSizeT), "byte");
+    }
+    
+    // Calculate offset sizes following AthenaK's pattern (src/outputs/restart.cpp:267-278)
+    IOWrapperSizeT step1size = header_offset_;  // Parameter data size
+    IOWrapperSizeT step2size = fine_nmb_total * (sizeof(LogicalLocation) + sizeof(float));  // MB lists
+    IOWrapperSizeT step3size = 0;  // Internal state data size
+    if (phys_config.has_z4c) step3size += sizeof(Real);
+    if (phys_config.nco > 0) step3size += 3 * phys_config.nco * sizeof(Real);
+    if (phys_config.has_turbulence) step3size += sizeof(RNG_State);
+    
+    // Add header data size (3*sizeof(int) + 2*sizeof(Real) + sizeof(RegionSize) + 2*sizeof(RegionIndcs))
+    step1size += 3*sizeof(int) + 2*sizeof(Real) + sizeof(RegionSize) + 2*sizeof(RegionIndcs);
+    
+    // Calculate offset following AthenaK's pattern
+    // For now, simplified to rank 0 writes all data, but with proper offset calculation
+    IOWrapperSizeT offset_myrank = step1size + step2size + step3size + sizeof(IOWrapperSizeT);
+    if (reader_.GetMyRank() == 0) {
+        // For rank 0, gids_eachrank[0] = 0, so no additional offset needed
+        // In full MPI implementation: offset_myrank += data_size * gids_eachrank[my_rank]
+    }
+    IOWrapperSizeT myoffset = offset_myrank;
+    
+    // Write physics data following AthenaK's exact pattern
+    if (reader_.GetMyRank() == 0) {
+        int cells_per_mb = nout1 * nout2 * nout3;
+        
+        // Write hydro data following AthenaK's pattern (lines 284-317)
+        if (phys_config.has_hydro) {
+            const Real* hydro_data = GetFineHydroData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = hydro_data + mb * phys_config.nhydro * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nhydro * cells_per_mb * sizeof(Real);
+                // Use offset-based writing like AthenaK
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered hydro data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+        }
+        offset_myrank += nout1*nout2*nout3*phys_config.nhydro*sizeof(Real); // hydro u0
+        myoffset = offset_myrank;
+        
+        // Write MHD data following AthenaK's pattern (lines 318-350)
+        // IMPORTANT: AthenaK writes cell-centered data for ALL meshblocks first,
+        // THEN face-centered data for ALL meshblocks
+        if (phys_config.has_mhd) {
+            // First write ALL cell-centered MHD data
+            const Real* mhd_data = GetFineMHDData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = mhd_data + mb * phys_config.nmhd * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nmhd * cells_per_mb * sizeof(Real);
+                // Use offset-based writing like AthenaK
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered mhd data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+        }
+        offset_myrank += nout1*nout2*nout3*phys_config.nmhd*sizeof(Real);   // mhd u0
+        myoffset = offset_myrank;
+        
+        // Write MHD face-centered data following AthenaK's pattern (lines 352-432)
+        if (phys_config.has_mhd) {
+            
+            // Then write ALL face-centered data
+            const Real* x1f_data = GetFineX1FData();
+            const Real* x2f_data = GetFineX2FData();
+            const Real* x3f_data = GetFineX3FData();
+            
+            int x1f_size = nout3 * nout2 * (nout1 + 1);
+            int x2f_size = nout3 * (nout2 + 1) * nout1;
+            int x3f_size = (nout3 + 1) * nout2 * nout1;
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                // Write x1f, x2f, x3f for this meshblock in sequence following AthenaK pattern
+                const Real* x1f_mb = x1f_data + mb * x1f_size;
+                // print the first pixel value of x1f_mb
+                if (file_.Write_any_type_at_all(x1f_mb, x1f_size, myoffset, "Real") != x1f_size) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "b0.x1f data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += x1f_size*sizeof(Real);
+                
+                const Real* x2f_mb = x2f_data + mb * x2f_size;
+                if (file_.Write_any_type_at_all(x2f_mb, x2f_size, myoffset, "Real") != x2f_size) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "b0.x2f data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += x2f_size*sizeof(Real);
+                
+                const Real* x3f_mb = x3f_data + mb * x3f_size;
+                if (file_.Write_any_type_at_all(x3f_mb, x3f_size, myoffset, "Real") != x3f_size) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "b0.x3f data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += x3f_size*sizeof(Real);
+                
+                // Adjust offset to account for other physics data in this meshblock
+                myoffset += data_size-(x1f_size+x2f_size+x3f_size)*sizeof(Real);
+            }
+            offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
+            offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
+            offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+            myoffset = offset_myrank;
+        }
+        
+        // Write turbulence force data following AthenaK's pattern (lines 469-502)
+        if (phys_config.has_turbulence) {
+            const Real* turb_data = GetFineTurbData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = turb_data + mb * phys_config.nforce * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nforce * cells_per_mb * sizeof(Real);
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered turb data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+        }
+        offset_myrank += nout1*nout2*nout3*phys_config.nforce*sizeof(Real); // forcing
+        myoffset = offset_myrank;
+        
+        // Write Z4c data following AthenaK's pattern (lines 504-536)
+        if (phys_config.has_z4c) {
+            const Real* z4c_data = GetFineZ4cData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = z4c_data + mb * phys_config.nz4c * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nz4c * cells_per_mb * sizeof(Real);
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered z4c data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+            offset_myrank += nout1*nout2*nout3*phys_config.nz4c*sizeof(Real); // z4c u0
+            myoffset = offset_myrank;
+        } else if (phys_config.has_adm) {
+            const Real* adm_data = GetFineADMData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = adm_data + mb * phys_config.nadm * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nadm * cells_per_mb * sizeof(Real);
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered adm data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+            offset_myrank += nout1*nout2*nout3*phys_config.nadm*sizeof(Real); // adm u_adm
+            myoffset = offset_myrank;
+        }
+        
+        // Write radiation data following AthenaK's pattern (lines 434-467)
+        if (phys_config.has_radiation) {
+            const Real* rad_data = GetFineRadData();
+            for (int mb = 0; mb < fine_nmb_total; mb++) {
+                const Real* mb_data = rad_data + mb * phys_config.nrad * cells_per_mb;
+                IOWrapperSizeT bytes = phys_config.nrad * cells_per_mb * sizeof(Real);
+                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered rad data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    return false;
+                }
+                myoffset += data_size;
+            }
+            offset_myrank += nout1*nout2*nout3*phys_config.nrad*sizeof(Real);   // radiation i0
+            myoffset = offset_myrank;
+        }
+    }
+    
+#if MPI_PARALLEL_ENABLED
+    // Ensure all ranks wait for rank 0 to finish
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+    
+    return true;
 }

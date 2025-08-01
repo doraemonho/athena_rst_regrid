@@ -1,76 +1,55 @@
 #ifndef RESTART_WRITER_HPP_
 #define RESTART_WRITER_HPP_
-//========================================================================================
-// AthenaK Regridding Tool - RestartWriter Class
-// Licensed under the 3-clause BSD License (the "LICENSE")
-//========================================================================================
-//! \file restart_writer.hpp
-//  \brief Class for writing regridded data to AthenaK restart files
 
 #include <string>
-#include <sstream>
-
-// Standalone includes
-#include "restart_reader.hpp"
-#include "mesh_regrid.hpp"
-#include "data_interpolator.hpp"
+#include "common.hpp"
 #include "io_wrapper.hpp"
+#include "restart_reader.hpp"
+
+// Forward declaration
+class Upscaler;
 
 //----------------------------------------------------------------------------------------
-//! \class RestartWriter
-//! \brief Handles writing regridded data to AthenaK restart files
+// RestartWriter class - writes restart files in AthenaK format
+//----------------------------------------------------------------------------------------
 class RestartWriter {
- public:
-  RestartWriter() = default;
-  ~RestartWriter() = default;
-  
-  // Main interface functions
-  bool WriteRestartFile(const std::string& output_filename,
-                       const RestartData& input_data,
-                       const NewMeshData& mesh_data,
-                       const InterpolatedData& physics_data);
-  
-  // Configuration options
-  void SetOutputFileNumber(int file_num) { output_file_number_ = file_num; }
-  void SetUpdateTime(bool update) { update_time_ = update; }
-  void SetNewTime(Real new_time) { new_time_ = new_time; }
-  
-  // Error handling
-  const std::string& GetLastError() const { return last_error_; }
-  
- private:
-  // Write file sections (matching AthenaK format)
-  bool WriteHeader(IOWrapper& file, const RestartData& input_data, 
-                  const NewMeshData& mesh_data);
-  bool WriteMeshStructure(IOWrapper& file, const NewMeshData& mesh_data);
-  bool WriteInternalState(IOWrapper& file, const RestartData& input_data);
-  bool WritePhysicsData(IOWrapper& file, const NewMeshData& mesh_data,
-                       const InterpolatedData& physics_data);
-  
-  // Header generation
-  std::string GenerateUpdatedInputParameters(const RestartData& input_data,
-                                            const NewMeshData& mesh_data);
-  bool UpdateParameterValue(std::string& params, const std::string& section,
-                           const std::string& key, const std::string& value);
-  
-  // Data size calculations
-  IOWrapperSizeT CalculateDataSize(const NewMeshData& mesh_data,
-                                  const InterpolatedData& physics_data) const;
-  IOWrapperSizeT CalculateOffsetSize(const RestartData& input_data) const;
-  
-  // Validation
-  bool ValidateOutputData(const NewMeshData& mesh_data,
-                         const InterpolatedData& physics_data) const;
-  bool ValidateFileStructure(const std::string& filename) const;
-  
-  // Error reporting
-  void SetError(const std::string& error) const { last_error_ = error; }
-  mutable std::string last_error_;
-  
-  // Configuration
-  int output_file_number_ = 0;
-  bool update_time_ = false;
-  Real new_time_ = 0.0;
+public:
+    RestartWriter(RestartReader& reader, Upscaler& upscaler);
+    ~RestartWriter() = default;
+    
+    bool WriteRestartFile(const std::string& filename);
+    
+private:
+    RestartReader& reader_;
+    Upscaler& upscaler_;
+    IOWrapper file_;
+    IOWrapperSizeT header_offset_;
+    
+    // Private methods
+    bool WriteParameterData();
+    bool WriteHeaderData();
+    bool WriteMeshBlockLists();
+    bool WriteInternalState();
+    bool WritePhysicsData();
+    
+    // Get upscaled mesh configuration from upscaler
+    RegionSize GetFineMeshSize() const;
+    RegionIndcs GetFineMeshIndcs() const;
+    RegionIndcs GetFineMBIndcs() const;
+    int GetFineNMBTotal() const;
+    const std::vector<LogicalLocation>& GetFineLlocEachMB() const;
+    const std::vector<float>& GetFineCostEachMB() const;
+    
+    // Get upscaled data arrays from upscaler
+    const Real* GetFineHydroData() const;
+    const Real* GetFineMHDData() const;
+    const Real* GetFineX1FData() const;
+    const Real* GetFineX2FData() const;
+    const Real* GetFineX3FData() const;
+    const Real* GetFineRadData() const;
+    const Real* GetFineTurbData() const;
+    const Real* GetFineZ4cData() const;
+    const Real* GetFineADMData() const;
 };
 
 #endif // RESTART_WRITER_HPP_

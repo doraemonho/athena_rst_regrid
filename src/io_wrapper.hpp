@@ -1,68 +1,61 @@
 #ifndef IO_WRAPPER_HPP_
 #define IO_WRAPPER_HPP_
 //========================================================================================
-// AthenaK Regridding Tool - Standalone IOWrapper
+// AthenaXXX astrophysical plasma code
+// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file io_wrapper.hpp
-//  \brief Standalone IOWrapper class for regridding tool
+//  \brief defines a set of small wrapper functions for MPI versus serial outputs.
 
-#include <cstdio>
-#include <cstdint>
 #include <string>
+#include <cstdio>
+#include "common.hpp"
 
-//----------------------------------------------------------------------------------------
-//! Type definitions
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+using  IOWrapperFile = MPI_File;
+#else
+using  IOWrapperFile = FILE*;
+#endif
+
 using IOWrapperSizeT = std::uint64_t;
 
-//----------------------------------------------------------------------------------------
-//! \class IOWrapper
-//! \brief Standalone file I/O wrapper class
 class IOWrapper {
  public:
-  enum class FileMode {
-    read,
-    write
-  };
+#if MPI_PARALLEL_ENABLED
+  IOWrapper() : fh_(nullptr), comm_(MPI_COMM_WORLD) {}
+  void SetCommunicator(MPI_Comm scomm) { comm_=scomm;}
+#else
+  IOWrapper() {fh_=nullptr;}
+#endif
+  ~IOWrapper() {}
+  // nested type definition of strongly typed/scoped enum in class definition
+  enum class FileMode {read, write, append};
 
-  IOWrapper() : file_(nullptr), is_open_(false) {}
-  ~IOWrapper() { Close(); }
-
-  // File operations
-  int Open(const char* filename, FileMode mode);
-  void Close();
-  bool IsOpen() const { return is_open_; }
-
-  // Read operations
-  size_t Read_bytes(void* buf, size_t size, size_t count);
-  template<typename T>
-  size_t Read_any_type(T* data, size_t count) {
-    return Read_bytes(data, sizeof(T), count);
-  }
-
-  // Write operations  
-  size_t Write_bytes(const void* buf, size_t size, size_t count);
-  // AthenaK-compatible interface: count is total bytes, not element count  
-  size_t Write_any_type(const void* data, size_t byte_count, const char* type_name) {
-    (void)type_name; // Ignore type name in standalone version
-    return Write_bytes(data, 1, byte_count);
-  }
-
-  // Position operations
+  // wrapper functions for basic I/O tasks
+  int Open(const char* fname, FileMode rw);
+  std::size_t Read_bytes(void *buf, IOWrapperSizeT size, IOWrapperSizeT count);
+  std::size_t Read_bytes_at(void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
+                            IOWrapperSizeT offset);
+  std::size_t Read_bytes_at_all(void *buf, IOWrapperSizeT size, IOWrapperSizeT count,
+                                IOWrapperSizeT offset);
+  std::size_t Write_any_type(const void *buf, IOWrapperSizeT count, std::string type);
+  std::size_t Write_any_type_at(const void *buf, IOWrapperSizeT count,
+                                IOWrapperSizeT offset, std::string type);
+  std::size_t Write_any_type_at_all(const void *buf, IOWrapperSizeT count,
+                                    IOWrapperSizeT offset, std::string type);
+  std::size_t Read_Reals(void *buf, IOWrapperSizeT count);
+  std::size_t Read_Reals_at(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset);
+  std::size_t Read_Reals_at_all(void *buf, IOWrapperSizeT count, IOWrapperSizeT offset);
+  int Close();
+  int Seek(IOWrapperSizeT offset);
   IOWrapperSizeT GetPosition();
-  int Seek(IOWrapperSizeT pos);
-  int SeekFromEnd(IOWrapperSizeT offset);
-
-  // Error checking
-  bool HasError() const;
-  std::string GetLastError() const;
 
  private:
-  FILE* file_;
-  bool is_open_;
-  mutable std::string last_error_;
-
-  void SetError(const std::string& error) const { last_error_ = error; }
+  IOWrapperFile fh_;
+#if MPI_PARALLEL_ENABLED
+  MPI_Comm comm_;
+#endif
 };
-
 #endif // IO_WRAPPER_HPP_
