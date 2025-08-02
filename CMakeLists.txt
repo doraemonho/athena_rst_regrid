@@ -63,7 +63,6 @@ add_executable(restart_reader ${SOURCES})
 # Create test executable for MPI write (exclude main.cpp from SOURCES)
 set(TEST_SOURCES ${SOURCES})
 list(REMOVE_ITEM TEST_SOURCES src/main.cpp)
-add_executable(test_mpi_write test_mpi_write.cpp ${TEST_SOURCES})
 
 # Create static library (optional, for linking with other projects)
 add_library(restart_reader_lib STATIC ${SOURCES})
@@ -72,7 +71,6 @@ target_include_directories(restart_reader_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 # MPI linking
 if(ENABLE_MPI)
     target_link_libraries(restart_reader PRIVATE MPI::MPI_CXX)
-    target_link_libraries(test_mpi_write PRIVATE MPI::MPI_CXX)
     target_link_libraries(restart_reader_lib PUBLIC MPI::MPI_CXX)
 endif()
 
