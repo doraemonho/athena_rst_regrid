@@ -3,6 +3,7 @@
 #include "prolongation.hpp"
 #include <iostream>
 #include <cstring>
+#include <limits>
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -384,6 +385,51 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
     int cnx2_tot = (cnx2 > 1) ? cnx2 + 2*cng : 1;
     int cnx3_tot = (cnx3 > 1) ? cnx3 + 2*cng : 1;
     int cells_per_mb = cnx3_tot * cnx2_tot * cnx1_tot;
+    
+    // Add overflow checks for memory allocation
+    if (reader_.GetMyRank() == 0) {
+        std::cout << "\nMemory allocation check:" << std::endl;
+        std::cout << "  fine_nmb_total_ = " << fine_nmb_total_ << std::endl;
+        std::cout << "  cells_per_mb = " << cells_per_mb << std::endl;
+        
+        // Check for potential overflow in size calculations
+        size_t max_size_t = std::numeric_limits<size_t>::max();
+        
+        // Check hydro allocation
+        if (phys_config.has_hydro) {
+            size_t hydro_elements = fine_nmb_total_ * phys_config.nhydro * cells_per_mb;
+            if (fine_nmb_total_ > max_size_t / (phys_config.nhydro * cells_per_mb)) {
+                std::cerr << "ERROR: Integer overflow detected in hydro data allocation!" << std::endl;
+                std::cerr << "  Required elements would exceed size_t maximum" << std::endl;
+                return false;
+            }
+            std::cout << "  Hydro data: " << hydro_elements << " elements = " 
+                      << (hydro_elements * sizeof(Real) / (1024.0*1024.0*1024.0)) << " GB" << std::endl;
+        }
+        
+        // Check MHD allocation
+        if (phys_config.has_mhd) {
+            size_t mhd_elements = fine_nmb_total_ * phys_config.nmhd * cells_per_mb;
+            if (fine_nmb_total_ > max_size_t / (phys_config.nmhd * cells_per_mb)) {
+                std::cerr << "ERROR: Integer overflow detected in MHD data allocation!" << std::endl;
+                return false;
+            }
+            
+            // Check face-centered arrays
+            size_t x1f_check = fine_nmb_total_ * cnx3_tot * cnx2_tot * (cnx1_tot + 1);
+            size_t x2f_check = fine_nmb_total_ * cnx3_tot * (cnx2_tot + 1) * cnx1_tot;
+            size_t x3f_check = fine_nmb_total_ * (cnx3_tot + 1) * cnx2_tot * cnx1_tot;
+            
+            std::cout << "  MHD cell-centered: " << mhd_elements << " elements = " 
+                      << (mhd_elements * sizeof(Real) / (1024.0*1024.0*1024.0)) << " GB" << std::endl;
+            std::cout << "  MHD face x1f: " << x1f_check << " elements = " 
+                      << (x1f_check * sizeof(Real) / (1024.0*1024.0*1024.0)) << " GB" << std::endl;
+            std::cout << "  MHD face x2f: " << x2f_check << " elements = " 
+                      << (x2f_check * sizeof(Real) / (1024.0*1024.0*1024.0)) << " GB" << std::endl;
+            std::cout << "  MHD face x3f: " << x3f_check << " elements = " 
+                      << (x3f_check * sizeof(Real) / (1024.0*1024.0*1024.0)) << " GB" << std::endl;
+        }
+    }
     
     // Allocate storage for fine data
     if (phys_config.has_hydro) {

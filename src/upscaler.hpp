@@ -26,7 +26,7 @@ private:
     RegionSize fine_mesh_size_;
     RegionIndcs fine_mesh_indcs_;
     RegionIndcs fine_mb_indcs_;
-    int fine_nmb_total_;
+    size_t fine_nmb_total_;
     std::vector<LogicalLocation> fine_lloc_eachmb_;
     std::vector<float> fine_cost_eachmb_;
     

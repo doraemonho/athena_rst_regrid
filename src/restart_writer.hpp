@@ -36,7 +36,7 @@ private:
     RegionSize GetFineMeshSize() const;
     RegionIndcs GetFineMeshIndcs() const;
     RegionIndcs GetFineMBIndcs() const;
-    int GetFineNMBTotal() const;
+    size_t GetFineNMBTotal() const;
     const std::vector<LogicalLocation>& GetFineLlocEachMB() const;
     const std::vector<float>& GetFineCostEachMB() const;
     

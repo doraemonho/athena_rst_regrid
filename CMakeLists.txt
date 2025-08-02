@@ -29,29 +29,29 @@ endif()
 
 # Source files
 set(SOURCES
-    main.cpp
-    restart_reader.cpp
-    io_wrapper.cpp
-    parameter_parser.cpp
-    mpi_distribution.cpp
-    physics_reader.cpp
-    upscaler.cpp
-    restart_writer.cpp
-    simple_parameter_input.cpp
+    src/main.cpp
+    src/restart_reader.cpp
+    src/io_wrapper.cpp
+    src/parameter_parser.cpp
+    src/mpi_distribution.cpp
+    src/physics_reader.cpp
+    src/upscaler.cpp
+    src/restart_writer.cpp
+    src/simple_parameter_input.cpp
 )
 
 # Header files
 set(HEADERS
-    common.hpp
-    restart_reader.hpp
-    io_wrapper.hpp
-    parameter_parser.hpp
-    mpi_distribution.hpp
-    physics_reader.hpp
-    prolongation.hpp
-    upscaler.hpp
-    restart_writer.hpp
-    simple_parameter_input.hpp
+    src/common.hpp
+    src/restart_reader.hpp
+    src/io_wrapper.hpp
+    src/parameter_parser.hpp
+    src/mpi_distribution.hpp
+    src/physics_reader.hpp
+    src/prolongation.hpp
+    src/upscaler.hpp
+    src/restart_writer.hpp
+    src/simple_parameter_input.hpp
 )
 
 # Create main executable

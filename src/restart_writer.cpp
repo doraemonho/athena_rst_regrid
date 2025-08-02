@@ -27,7 +27,7 @@ RegionIndcs RestartWriter::GetFineMBIndcs() const {
     return upscaler_.fine_mb_indcs_; 
 }
 
-int RestartWriter::GetFineNMBTotal() const { 
+size_t RestartWriter::GetFineNMBTotal() const { 
     return upscaler_.fine_nmb_total_; 
 }
 
@@ -198,7 +198,7 @@ bool RestartWriter::WriteParameterData() {
 bool RestartWriter::WriteHeaderData() {
     if (reader_.GetMyRank() == 0) {
         // Write header data following AthenaK format
-        int fine_nmb_total = GetFineNMBTotal();
+        int fine_nmb_total = static_cast<int>(GetFineNMBTotal());
         int root_level = reader_.GetRootLevel() + 1;  // Root level increases by 1 when doubling resolution
         RegionSize fine_mesh_size = GetFineMeshSize();
         RegionIndcs fine_mesh_indcs = GetFineMeshIndcs();
@@ -243,7 +243,7 @@ bool RestartWriter::WriteMeshBlockLists() {
     if (reader_.GetMyRank() == 0) {
         const std::vector<LogicalLocation>& fine_llocs = GetFineLlocEachMB();
         const std::vector<float>& fine_costs = GetFineCostEachMB();
-        int fine_nmb_total = GetFineNMBTotal();
+        size_t fine_nmb_total = GetFineNMBTotal();
         
         file_.Write_any_type(fine_llocs.data(), fine_nmb_total * sizeof(LogicalLocation), "byte");
         file_.Write_any_type(fine_costs.data(), fine_nmb_total * sizeof(float), "byte");
@@ -288,7 +288,7 @@ bool RestartWriter::WriteInternalState() {
 bool RestartWriter::WritePhysicsData() {
     const PhysicsConfig& phys_config = reader_.GetPhysicsConfig();
     RegionIndcs mb_indcs = GetFineMBIndcs();
-    int fine_nmb_total = GetFineNMBTotal();
+    size_t fine_nmb_total = GetFineNMBTotal();
     
     int nx1 = mb_indcs.nx1;
     int nx2 = mb_indcs.nx2;
@@ -355,7 +355,7 @@ bool RestartWriter::WritePhysicsData() {
         // Write hydro data following AthenaK's pattern (lines 284-317)
         if (phys_config.has_hydro) {
             const Real* hydro_data = GetFineHydroData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = hydro_data + mb * phys_config.nhydro * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nhydro * cells_per_mb * sizeof(Real);
                 // Use offset-based writing like AthenaK
@@ -377,7 +377,7 @@ bool RestartWriter::WritePhysicsData() {
         if (phys_config.has_mhd) {
             // First write ALL cell-centered MHD data
             const Real* mhd_data = GetFineMHDData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = mhd_data + mb * phys_config.nmhd * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nmhd * cells_per_mb * sizeof(Real);
                 // Use offset-based writing like AthenaK
@@ -404,7 +404,7 @@ bool RestartWriter::WritePhysicsData() {
             int x1f_size = nout3 * nout2 * (nout1 + 1);
             int x2f_size = nout3 * (nout2 + 1) * nout1;
             int x3f_size = (nout3 + 1) * nout2 * nout1;
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 // Write x1f, x2f, x3f for this meshblock in sequence following AthenaK pattern
                 const Real* x1f_mb = x1f_data + mb * x1f_size;
                 // print the first pixel value of x1f_mb
@@ -446,7 +446,7 @@ bool RestartWriter::WritePhysicsData() {
         // Write turbulence force data following AthenaK's pattern (lines 469-502)
         if (phys_config.has_turbulence) {
             const Real* turb_data = GetFineTurbData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = turb_data + mb * phys_config.nforce * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nforce * cells_per_mb * sizeof(Real);
                 if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
@@ -464,7 +464,7 @@ bool RestartWriter::WritePhysicsData() {
         // Write Z4c data following AthenaK's pattern (lines 504-536)
         if (phys_config.has_z4c) {
             const Real* z4c_data = GetFineZ4cData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = z4c_data + mb * phys_config.nz4c * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nz4c * cells_per_mb * sizeof(Real);
                 if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
@@ -479,7 +479,7 @@ bool RestartWriter::WritePhysicsData() {
             myoffset = offset_myrank;
         } else if (phys_config.has_adm) {
             const Real* adm_data = GetFineADMData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = adm_data + mb * phys_config.nadm * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nadm * cells_per_mb * sizeof(Real);
                 if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
@@ -497,7 +497,7 @@ bool RestartWriter::WritePhysicsData() {
         // Write radiation data following AthenaK's pattern (lines 434-467)
         if (phys_config.has_radiation) {
             const Real* rad_data = GetFineRadData();
-            for (int mb = 0; mb < fine_nmb_total; mb++) {
+            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
                 const Real* mb_data = rad_data + mb * phys_config.nrad * cells_per_mb;
                 IOWrapperSizeT bytes = phys_config.nrad * cells_per_mb * sizeof(Real);
                 if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
