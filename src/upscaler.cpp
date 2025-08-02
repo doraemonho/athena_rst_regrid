@@ -123,8 +123,20 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
             int fi_offset = (fmb % 2) * cnx1;
             
             // Get pointer to fine data for this meshblock and variable
-            Real* fine_var = fine_data + (fine_mb_start_id + fmb) * nvars * cnx3_tot * cnx2_tot * cnx1_tot 
+            size_t fine_offset = (fine_mb_start_id + fmb) * nvars * cnx3_tot * cnx2_tot * cnx1_tot 
                            + v * cnx3_tot * cnx2_tot * cnx1_tot;
+            Real* fine_var = fine_data + fine_offset;
+            
+            // DEBUG: Print pointer calculations
+            if (v == 0 && fmb == 0) {
+                std::cout << "\nDEBUG: Meshblock pointer calculations:" << std::endl;
+                std::cout << "  fine_mb_start_id=" << fine_mb_start_id << " fmb=" << fmb << std::endl;
+                std::cout << "  nvars=" << nvars << " cnx1_tot=" << cnx1_tot << " cnx2_tot=" << cnx2_tot << " cnx3_tot=" << cnx3_tot << std::endl;
+                std::cout << "  cells_per_mb=" << (cnx3_tot * cnx2_tot * cnx1_tot) << std::endl;
+                std::cout << "  fine_offset=" << fine_offset << std::endl;
+                std::cout << "  fine_data base=" << (void*)fine_data << " fine_var=" << (void*)fine_var << std::endl;
+                std::cout << "  Total fine data size=" << (fine_nmb_total_ * nvars * cnx3_tot * cnx2_tot * cnx1_tot) << std::endl;
+            }
             
             // Prolongate cells from coarse to fine meshblock
             // The approach is: for each fine meshblock, determine which coarse cells
@@ -138,6 +150,14 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
             int cj_end = cng + (multi_d ? (fj_offset > 0 ? cnx2 : cnx2/2) : 1);
             int ck_start = cng + (three_d && fk_offset > 0 ? cnx3/2 : 0);
             int ck_end = cng + (three_d ? (fk_offset > 0 ? cnx3 : cnx3/2) : 1);
+            
+            // DEBUG: Print loop bounds for first meshblock
+            if (v == 0 && fmb == 0) {
+                std::cout << "\nDEBUG: Loop bounds for fmb=" << fmb << ":" << std::endl;
+                std::cout << "  ci: " << ci_start << " to " << ci_end << std::endl;
+                std::cout << "  cj: " << cj_start << " to " << cj_end << std::endl;
+                std::cout << "  ck: " << ck_start << " to " << ck_end << std::endl;
+            }
             
             // Loop over coarse cells that map to this fine meshblock
             for (int k = ck_start; k < ck_end; k++) {
