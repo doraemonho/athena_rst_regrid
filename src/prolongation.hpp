@@ -38,15 +38,7 @@ inline void ProlongCCStandalone(
     };
     
     // Get value at coarse cell
-    size_t coarse_idx = idx3d(ck, cj, ci, cnx1, cnx2);
-    // DEBUG: Check coarse index bounds
-    if (coarse_idx >= cnx3 * cnx2 * cnx1) {
-        std::cout << "\nERROR: Coarse index out of bounds!" << std::endl;
-        std::cout << "  ck=" << ck << " cj=" << cj << " ci=" << ci << std::endl;
-        std::cout << "  cnx1=" << cnx1 << " cnx2=" << cnx2 << " cnx3=" << cnx3 << std::endl;
-        std::cout << "  coarse_idx=" << coarse_idx << " max=" << (cnx3 * cnx2 * cnx1 - 1) << std::endl;
-    }
-    Real val = coarse_data[coarse_idx];
+    Real val = coarse_data[idx3d(ck, cj, ci, cnx1, cnx2)];
     
     // Calculate x1-gradient using min-mod limiter
     Real dl = 0.0, dr = 0.0, dvar1 = 0.0;
@@ -73,17 +65,6 @@ inline void ProlongCCStandalone(
     }
     
     // Interpolate to the finer grid
-    // DEBUG: Check indices before writing
-    if (ck == 68 && cj == 4 && ci == 68) {
-        std::cout << "\nDEBUG: Prolongation at problematic indices:" << std::endl;
-        std::cout << "  Coarse: ck=" << ck << " cj=" << cj << " ci=" << ci << std::endl;
-        std::cout << "  Fine: fk=" << fk << " fj=" << fj << " fi=" << fi << std::endl;
-        std::cout << "  Fine dims: fnx1=" << fnx1 << " fnx2=" << fnx2 << " fnx3=" << fnx3 << std::endl;
-        std::cout << "  idx3d(fk,fj,fi)=" << idx3d(fk, fj, fi, fnx1, fnx2) << std::endl;
-        std::cout << "  idx3d(fk,fj,fi+1)=" << idx3d(fk, fj, fi+1, fnx1, fnx2) << std::endl;
-        std::cout << "  Max valid index=" << (fnx3 * fnx2 * fnx1 - 1) << std::endl;
-    }
-    
     fine_data[idx3d(fk, fj, fi, fnx1, fnx2)] = val - dvar1 - dvar2 - dvar3;
     fine_data[idx3d(fk, fj, fi+1, fnx1, fnx2)] = val + dvar1 - dvar2 - dvar3;
     
