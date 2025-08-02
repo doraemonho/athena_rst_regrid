@@ -19,6 +19,8 @@ public:
     int GetStartingMeshBlockID(int rank) const { return gids_eachrank_[rank]; }
     int GetNumMeshBlocks(int rank) const { return nmb_eachrank_[rank]; }
     void GetRankMinMax(int* noutmbs_min, int* noutmbs_max) const;
+    const std::vector<int>& GetGidsEachRank() const { return gids_eachrank_; }
+    const std::vector<int>& GetNmbEachRank() const { return nmb_eachrank_; }
     
     // Print distribution info
     void PrintDistribution() const;

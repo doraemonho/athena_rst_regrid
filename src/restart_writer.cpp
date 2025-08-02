@@ -12,7 +12,29 @@
 
 // RestartWriter implementation
 RestartWriter::RestartWriter(RestartReader& reader, Upscaler& upscaler) 
-    : reader_(reader), upscaler_(upscaler), header_offset_(0) {
+    : reader_(reader), upscaler_(upscaler), header_offset_(0), 
+      my_rank_(0), nranks_(1), nmb_thisrank_(0), 
+      noutmbs_min_(0), noutmbs_max_(0) {
+    
+    // Get MPI info from reader
+    my_rank_ = reader_.GetMyRank();
+    nranks_ = reader_.GetNRanks();
+    
+    // Setup MPI distribution for the upscaled mesh
+    size_t fine_nmb_total = GetFineNMBTotal();
+    mpi_dist_ = std::make_unique<MPIDistribution>(nranks_, fine_nmb_total);
+    mpi_dist_->SetupDistribution(nullptr, nullptr);  // Use automatic load balancing
+    
+    // Get distribution info
+    nmb_thisrank_ = mpi_dist_->GetNumMeshBlocks(my_rank_);
+    mpi_dist_->GetRankMinMax(&noutmbs_min_, &noutmbs_max_);
+    
+    if (my_rank_ == 0) {
+        std::cout << "RestartWriter initialized with MPI support:" << std::endl;
+        std::cout << "  Number of ranks: " << nranks_ << std::endl;
+        std::cout << "  Fine mesh total MeshBlocks: " << fine_nmb_total << std::endl;
+        mpi_dist_->PrintDistribution();
+    }
 }
 
 RegionSize RestartWriter::GetFineMeshSize() const { 
@@ -73,6 +95,14 @@ const Real* RestartWriter::GetFineZ4cData() const {
 
 const Real* RestartWriter::GetFineADMData() const { 
     return upscaler_.fine_adm_data_.data(); 
+}
+
+const std::vector<int>& RestartWriter::GetFineGidsEachRank() const { 
+    return mpi_dist_->GetGidsEachRank(); 
+}
+
+const std::vector<int>& RestartWriter::GetFineNmbEachRank() const { 
+    return mpi_dist_->GetNmbEachRank(); 
 }
 
 bool RestartWriter::WriteRestartFile(const std::string& filename) {
@@ -324,9 +354,14 @@ bool RestartWriter::WritePhysicsData() {
     }
     
     // Write data size
-    if (reader_.GetMyRank() == 0) {
+    if (my_rank_ == 0) {
         file_.Write_any_type(&data_size, sizeof(IOWrapperSizeT), "byte");
     }
+    
+#if MPI_PARALLEL_ENABLED
+    // Ensure all ranks wait for rank 0 to write data size
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
     
     // Calculate offset sizes following AthenaK's pattern (src/outputs/restart.cpp:267-278)
     IOWrapperSizeT step1size = header_offset_;  // Parameter data size
@@ -339,27 +374,38 @@ bool RestartWriter::WritePhysicsData() {
     // Add header data size (3*sizeof(int) + 2*sizeof(Real) + sizeof(RegionSize) + 2*sizeof(RegionIndcs))
     step1size += 3*sizeof(int) + 2*sizeof(Real) + sizeof(RegionSize) + 2*sizeof(RegionIndcs);
     
-    // Calculate offset following AthenaK's pattern
-    // For now, simplified to rank 0 writes all data, but with proper offset calculation
-    IOWrapperSizeT offset_myrank = step1size + step2size + step3size + sizeof(IOWrapperSizeT);
-    if (reader_.GetMyRank() == 0) {
-        // For rank 0, gids_eachrank[0] = 0, so no additional offset needed
-        // In full MPI implementation: offset_myrank += data_size * gids_eachrank[my_rank]
-    }
+    // Calculate offset following AthenaK's pattern (src/outputs/restart.cpp:277-279)
+    // Each rank calculates its starting offset based on its starting global ID
+    IOWrapperSizeT offset_myrank = step1size + step2size + step3size + sizeof(IOWrapperSizeT) 
+                                  + data_size * mpi_dist_->GetStartingMeshBlockID(my_rank_);
     IOWrapperSizeT myoffset = offset_myrank;
     
-    // Write physics data following AthenaK's exact pattern
-    if (reader_.GetMyRank() == 0) {
-        int cells_per_mb = nout1 * nout2 * nout3;
-        
-        // Write hydro data following AthenaK's pattern (lines 284-317)
-        if (phys_config.has_hydro) {
-            const Real* hydro_data = GetFineHydroData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = hydro_data + mb * phys_config.nhydro * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nhydro * cells_per_mb * sizeof(Real);
-                // Use offset-based writing like AthenaK
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+    // Write physics data following AthenaK's exact pattern with MPI
+    int cells_per_mb = nout1 * nout2 * nout3;
+    
+    // Write hydro data following AthenaK's pattern (src/outputs/restart.cpp:284-317)
+    if (phys_config.has_hydro) {
+        const Real* hydro_data = GetFineHydroData();
+        // Each rank writes its assigned MeshBlocks
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = hydro_data + m * phys_config.nhydro * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nhydro * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered hydro data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = hydro_data + m * phys_config.nhydro * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nhydro * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered hydro data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -371,17 +417,33 @@ bool RestartWriter::WritePhysicsData() {
         offset_myrank += nout1*nout2*nout3*phys_config.nhydro*sizeof(Real); // hydro u0
         myoffset = offset_myrank;
         
-        // Write MHD data following AthenaK's pattern (lines 318-350)
-        // IMPORTANT: AthenaK writes cell-centered data for ALL meshblocks first,
-        // THEN face-centered data for ALL meshblocks
-        if (phys_config.has_mhd) {
-            // First write ALL cell-centered MHD data
-            const Real* mhd_data = GetFineMHDData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = mhd_data + mb * phys_config.nmhd * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nmhd * cells_per_mb * sizeof(Real);
-                // Use offset-based writing like AthenaK
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+    }
+    
+    // Write MHD data following AthenaK's pattern (src/outputs/restart.cpp:318-350)
+    // IMPORTANT: AthenaK writes cell-centered data for ALL meshblocks first,
+    // THEN face-centered data for ALL meshblocks
+    if (phys_config.has_mhd) {
+        // First write ALL cell-centered MHD data
+        const Real* mhd_data = GetFineMHDData();
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = mhd_data + m * phys_config.nmhd * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nmhd * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered mhd data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = mhd_data + m * phys_config.nmhd * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nmhd * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered mhd data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -393,22 +455,59 @@ bool RestartWriter::WritePhysicsData() {
         offset_myrank += nout1*nout2*nout3*phys_config.nmhd*sizeof(Real);   // mhd u0
         myoffset = offset_myrank;
         
-        // Write MHD face-centered data following AthenaK's pattern (lines 352-432)
-        if (phys_config.has_mhd) {
-            
-            // Then write ALL face-centered data
-            const Real* x1f_data = GetFineX1FData();
-            const Real* x2f_data = GetFineX2FData();
-            const Real* x3f_data = GetFineX3FData();
-            
-            int x1f_size = nout3 * nout2 * (nout1 + 1);
-            int x2f_size = nout3 * (nout2 + 1) * nout1;
-            int x3f_size = (nout3 + 1) * nout2 * nout1;
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
+        // Write MHD face-centered data following AthenaK's pattern (src/outputs/restart.cpp:352-432)
+        // Then write ALL face-centered data
+        const Real* x1f_data = GetFineX1FData();
+        const Real* x2f_data = GetFineX2FData();
+        const Real* x3f_data = GetFineX3FData();
+        
+        int x1f_size = nout3 * nout2 * (nout1 + 1);
+        int x2f_size = nout3 * (nout2 + 1) * nout1;
+        int x3f_size = (nout3 + 1) * nout2 * nout1;
+        
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    // Write x1f, x2f, x3f for this meshblock in sequence following AthenaK pattern
+                    const Real* x1f_mb = x1f_data + m * x1f_size;
+                    if (file_.Write_any_type_at_all(x1f_mb, x1f_size, myoffset, "Real") != x1f_size) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "b0.x1f data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                    myoffset += x1f_size*sizeof(Real);
+                    
+                    const Real* x2f_mb = x2f_data + m * x2f_size;
+                    if (file_.Write_any_type_at_all(x2f_mb, x2f_size, myoffset, "Real") != x2f_size) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "b0.x2f data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                    myoffset += x2f_size*sizeof(Real);
+                    
+                    const Real* x3f_mb = x3f_data + m * x3f_size;
+                    if (file_.Write_any_type_at_all(x3f_mb, x3f_size, myoffset, "Real") != x3f_size) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "b0.x3f data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                    myoffset += x3f_size*sizeof(Real);
+                    
+                    // Adjust offset to account for other physics data in this meshblock
+                    myoffset += data_size-(x1f_size+x2f_size+x3f_size)*sizeof(Real);
+                } else {
+                    // Rank doesn't have this MB but needs to advance offset for collective write
+                    myoffset += data_size;
+                }
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
                 // Write x1f, x2f, x3f for this meshblock in sequence following AthenaK pattern
-                const Real* x1f_mb = x1f_data + mb * x1f_size;
-                // print the first pixel value of x1f_mb
-                if (file_.Write_any_type_at_all(x1f_mb, x1f_size, myoffset, "Real") != x1f_size) {
+                const Real* x1f_mb = x1f_data + m * x1f_size;
+                if (file_.Write_any_type_at(x1f_mb, x1f_size, myoffset, "Real") != x1f_size) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "b0.x1f data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -416,8 +515,8 @@ bool RestartWriter::WritePhysicsData() {
                 }
                 myoffset += x1f_size*sizeof(Real);
                 
-                const Real* x2f_mb = x2f_data + mb * x2f_size;
-                if (file_.Write_any_type_at_all(x2f_mb, x2f_size, myoffset, "Real") != x2f_size) {
+                const Real* x2f_mb = x2f_data + m * x2f_size;
+                if (file_.Write_any_type_at(x2f_mb, x2f_size, myoffset, "Real") != x2f_size) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "b0.x2f data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -425,8 +524,8 @@ bool RestartWriter::WritePhysicsData() {
                 }
                 myoffset += x2f_size*sizeof(Real);
                 
-                const Real* x3f_mb = x3f_data + mb * x3f_size;
-                if (file_.Write_any_type_at_all(x3f_mb, x3f_size, myoffset, "Real") != x3f_size) {
+                const Real* x3f_mb = x3f_data + m * x3f_size;
+                if (file_.Write_any_type_at(x3f_mb, x3f_size, myoffset, "Real") != x3f_size) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "b0.x3f data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -437,19 +536,35 @@ bool RestartWriter::WritePhysicsData() {
                 // Adjust offset to account for other physics data in this meshblock
                 myoffset += data_size-(x1f_size+x2f_size+x3f_size)*sizeof(Real);
             }
-            offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
-            offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
-            offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
-            myoffset = offset_myrank;
         }
+        offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
+        offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
+        offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+        myoffset = offset_myrank;
+    }
         
-        // Write turbulence force data following AthenaK's pattern (lines 469-502)
-        if (phys_config.has_turbulence) {
-            const Real* turb_data = GetFineTurbData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = turb_data + mb * phys_config.nforce * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nforce * cells_per_mb * sizeof(Real);
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+    // Write turbulence force data following AthenaK's pattern (src/outputs/restart.cpp:469-502)
+    if (phys_config.has_turbulence) {
+        const Real* turb_data = GetFineTurbData();
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = turb_data + m * phys_config.nforce * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nforce * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered turb data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = turb_data + m * phys_config.nforce * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nforce * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered turb data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -460,14 +575,30 @@ bool RestartWriter::WritePhysicsData() {
         }
         offset_myrank += nout1*nout2*nout3*phys_config.nforce*sizeof(Real); // forcing
         myoffset = offset_myrank;
+    }
         
-        // Write Z4c data following AthenaK's pattern (lines 504-536)
-        if (phys_config.has_z4c) {
-            const Real* z4c_data = GetFineZ4cData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = z4c_data + mb * phys_config.nz4c * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nz4c * cells_per_mb * sizeof(Real);
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+    // Write Z4c data following AthenaK's pattern (src/outputs/restart.cpp:504-536)
+    if (phys_config.has_z4c) {
+        const Real* z4c_data = GetFineZ4cData();
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = z4c_data + m * phys_config.nz4c * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nz4c * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered z4c data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = z4c_data + m * phys_config.nz4c * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nz4c * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered z4c data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -475,14 +606,30 @@ bool RestartWriter::WritePhysicsData() {
                 }
                 myoffset += data_size;
             }
-            offset_myrank += nout1*nout2*nout3*phys_config.nz4c*sizeof(Real); // z4c u0
-            myoffset = offset_myrank;
-        } else if (phys_config.has_adm) {
-            const Real* adm_data = GetFineADMData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = adm_data + mb * phys_config.nadm * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nadm * cells_per_mb * sizeof(Real);
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+        }
+        offset_myrank += nout1*nout2*nout3*phys_config.nz4c*sizeof(Real); // z4c u0
+        myoffset = offset_myrank;
+    } else if (phys_config.has_adm) {
+        const Real* adm_data = GetFineADMData();
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = adm_data + m * phys_config.nadm * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nadm * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered adm data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = adm_data + m * phys_config.nadm * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nadm * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered adm data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -490,17 +637,33 @@ bool RestartWriter::WritePhysicsData() {
                 }
                 myoffset += data_size;
             }
-            offset_myrank += nout1*nout2*nout3*phys_config.nadm*sizeof(Real); // adm u_adm
-            myoffset = offset_myrank;
         }
-        
-        // Write radiation data following AthenaK's pattern (lines 434-467)
-        if (phys_config.has_radiation) {
-            const Real* rad_data = GetFineRadData();
-            for (size_t mb = 0; mb < fine_nmb_total; mb++) {
-                const Real* mb_data = rad_data + mb * phys_config.nrad * cells_per_mb;
-                IOWrapperSizeT bytes = phys_config.nrad * cells_per_mb * sizeof(Real);
-                if (file_.Write_any_type_at_all(mb_data, bytes/sizeof(Real), myoffset, "Real") != bytes/sizeof(Real)) {
+        offset_myrank += nout1*nout2*nout3*phys_config.nadm*sizeof(Real); // adm u_adm
+        myoffset = offset_myrank;
+    }
+    
+    // Write radiation data following AthenaK's pattern (src/outputs/restart.cpp:434-467)
+    if (phys_config.has_radiation) {
+        const Real* rad_data = GetFineRadData();
+        for (int m = 0; m < noutmbs_max_; ++m) {
+            // Every rank has a MB to write, so write collectively
+            if (m < noutmbs_min_) {
+                if (m < nmb_thisrank_) {
+                    const Real* mb_data = rad_data + m * phys_config.nrad * cells_per_mb;
+                    IOWrapperSizeT mbcnt = phys_config.nrad * cells_per_mb;
+                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                                  << std::endl << "cell-centered rad data not written correctly to rst file, "
+                                  << "restart file is broken." << std::endl;
+                        return false;
+                    }
+                }
+                myoffset += data_size;
+            // Some ranks are finished writing, so use non-collective write
+            } else if (m < nmb_thisrank_) {
+                const Real* mb_data = rad_data + m * phys_config.nrad * cells_per_mb;
+                IOWrapperSizeT mbcnt = phys_config.nrad * cells_per_mb;
+                if (file_.Write_any_type_at(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
                     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                               << std::endl << "cell-centered rad data not written correctly to rst file, "
                               << "restart file is broken." << std::endl;
@@ -508,13 +671,13 @@ bool RestartWriter::WritePhysicsData() {
                 }
                 myoffset += data_size;
             }
-            offset_myrank += nout1*nout2*nout3*phys_config.nrad*sizeof(Real);   // radiation i0
-            myoffset = offset_myrank;
         }
+        offset_myrank += nout1*nout2*nout3*phys_config.nrad*sizeof(Real);   // radiation i0
+        myoffset = offset_myrank;
     }
     
 #if MPI_PARALLEL_ENABLED
-    // Ensure all ranks wait for rank 0 to finish
+    // Ensure all ranks finish writing
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
     

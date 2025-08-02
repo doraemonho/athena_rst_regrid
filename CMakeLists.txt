@@ -11,7 +11,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Compiler flags
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
+set(CMAKE_CXX_FLAGS_DEBUG "-g3 -ggdb -O0 -Wall -Wextra -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 # Options
@@ -54,16 +54,25 @@ set(HEADERS
     src/simple_parameter_input.hpp
 )
 
+# Include directories
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 # Create main executable
 add_executable(restart_reader ${SOURCES})
 
+# Create test executable for MPI write (exclude main.cpp from SOURCES)
+set(TEST_SOURCES ${SOURCES})
+list(REMOVE_ITEM TEST_SOURCES src/main.cpp)
+add_executable(test_mpi_write test_mpi_write.cpp ${TEST_SOURCES})
+
 # Create static library (optional, for linking with other projects)
 add_library(restart_reader_lib STATIC ${SOURCES})
-target_include_directories(restart_reader_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(restart_reader_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # MPI linking
 if(ENABLE_MPI)
     target_link_libraries(restart_reader PRIVATE MPI::MPI_CXX)
+    target_link_libraries(test_mpi_write PRIVATE MPI::MPI_CXX)
     target_link_libraries(restart_reader_lib PUBLIC MPI::MPI_CXX)
 endif()
 

@@ -2,9 +2,11 @@
 #define RESTART_WRITER_HPP_
 
 #include <string>
+#include <memory>
 #include "common.hpp"
 #include "io_wrapper.hpp"
 #include "restart_reader.hpp"
+#include "mpi_distribution.hpp"
 
 // Forward declaration
 class Upscaler;
@@ -24,6 +26,14 @@ private:
     Upscaler& upscaler_;
     IOWrapper file_;
     IOWrapperSizeT header_offset_;
+    
+    // MPI-related members
+    int my_rank_;
+    int nranks_;
+    std::unique_ptr<MPIDistribution> mpi_dist_;
+    int nmb_thisrank_;  // number of MeshBlocks assigned to this rank
+    int noutmbs_min_;   // min number of MeshBlocks across all ranks
+    int noutmbs_max_;   // max number of MeshBlocks across all ranks
     
     // Private methods
     bool WriteParameterData();
@@ -50,6 +60,10 @@ private:
     const Real* GetFineTurbData() const;
     const Real* GetFineZ4cData() const;
     const Real* GetFineADMData() const;
+    
+    // Get MPI distribution info for fine mesh
+    const std::vector<int>& GetFineGidsEachRank() const;
+    const std::vector<int>& GetFineNmbEachRank() const;
 };
 
 #endif // RESTART_WRITER_HPP_
