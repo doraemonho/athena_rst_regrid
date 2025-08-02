@@ -123,8 +123,11 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
             int fi_offset = (fmb % 2) * cnx1;
             
             // Get pointer to fine data for this meshblock and variable
-            size_t fine_offset = (fine_mb_start_id + fmb) * nvars * cnx3_tot * cnx2_tot * cnx1_tot 
-                           + v * cnx3_tot * cnx2_tot * cnx1_tot;
+            // Use size_t for all calculations to avoid integer overflow
+            size_t cells_per_mb_size = static_cast<size_t>(cnx3_tot) * cnx2_tot * cnx1_tot;
+            size_t mb_offset = static_cast<size_t>(fine_mb_start_id + fmb) * nvars * cells_per_mb_size;
+            size_t var_offset = static_cast<size_t>(v) * cells_per_mb_size;
+            size_t fine_offset = mb_offset + var_offset;
             Real* fine_var = fine_data + fine_offset;
             
             // DEBUG: Print pointer calculations
@@ -132,10 +135,11 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
                 std::cout << "\nDEBUG: Meshblock pointer calculations:" << std::endl;
                 std::cout << "  fine_mb_start_id=" << fine_mb_start_id << " fmb=" << fmb << std::endl;
                 std::cout << "  nvars=" << nvars << " cnx1_tot=" << cnx1_tot << " cnx2_tot=" << cnx2_tot << " cnx3_tot=" << cnx3_tot << std::endl;
-                std::cout << "  cells_per_mb=" << (cnx3_tot * cnx2_tot * cnx1_tot) << std::endl;
+                std::cout << "  cells_per_mb_size=" << cells_per_mb_size << std::endl;
+                std::cout << "  mb_offset=" << mb_offset << " var_offset=" << var_offset << std::endl;
                 std::cout << "  fine_offset=" << fine_offset << std::endl;
                 std::cout << "  fine_data base=" << (void*)fine_data << " fine_var=" << (void*)fine_var << std::endl;
-                std::cout << "  Total fine data size=" << (fine_nmb_total_ * nvars * cnx3_tot * cnx2_tot * cnx1_tot) << std::endl;
+                std::cout << "  Total fine data size=" << (static_cast<size_t>(fine_nmb_total_) * nvars * cells_per_mb_size) << std::endl;
             }
             
             // Prolongate cells from coarse to fine meshblock
