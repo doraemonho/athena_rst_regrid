@@ -19,6 +19,10 @@ public:
     // Main upscaling function
     bool UpscaleRestartFile(const std::string& output_filename);
     
+    // Accessor for MPI distribution info (needed by RestartWriter)
+    size_t GetFineNMBThisRank() const { return fine_nmb_thisrank_; }
+    int GetFineGidsStart() const { return fine_gids_start_; }
+    
 private:
     RestartReader& reader_;
     
@@ -30,17 +34,27 @@ private:
     std::vector<LogicalLocation> fine_lloc_eachmb_;
     std::vector<float> fine_cost_eachmb_;
     
+    // MPI distribution for fine meshblocks
+    size_t fine_nmb_thisrank_;     // Number of fine meshblocks on this rank
+    int coarse_gids_start_;         // Starting global ID of coarse meshblocks for this rank
+    int fine_gids_start_;           // Starting global ID of fine meshblocks for this rank
+    int nfine_per_coarse_;          // Number of fine meshblocks per coarse meshblock (2/4/8)
+    
     // Helper functions
     void CalculateFineMeshConfiguration();
     void GenerateFineLogicalLocations();
-    bool UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
+    void SetupFineMPIDistribution();
+    int GetGlobalCoarseMBID(int local_mb_id) const;  // Convert local to global coarse MB ID
+    int GetLocalFineMBIndex(int local_coarse_mb, int fine_mb_within_coarse) const;  // Get local fine MB index
+    
+    bool UpscaleMeshBlock(int local_coarse_mb_id, int local_fine_mb_start_id,
                          const Real* coarse_data, Real* fine_data,
                          int nvars, bool is_face_centered = false, int face_dir = 0);
-    bool UpscaleFaceCenteredData(int coarse_mb_id, int fine_mb_start_id,
+    bool UpscaleFaceCenteredData(int local_coarse_mb_id, int local_fine_mb_start_id,
                                 const Real* coarse_x1f, const Real* coarse_x2f, const Real* coarse_x3f,
                                 Real* fine_x1f, Real* fine_x2f, Real* fine_x3f);
     
-    // Data storage for upscaled data
+    // Data storage for upscaled data (LOCAL to this rank only)
     std::vector<Real> fine_hydro_data_;
     std::vector<Real> fine_mhd_data_;
     std::vector<Real> fine_rad_data_;
@@ -48,7 +62,7 @@ private:
     std::vector<Real> fine_z4c_data_;
     std::vector<Real> fine_adm_data_;
     
-    // Face-centered data for MHD
+    // Face-centered data for MHD (LOCAL to this rank only)
     std::vector<Real> fine_x1f_data_;
     std::vector<Real> fine_x2f_data_;
     std::vector<Real> fine_x3f_data_;

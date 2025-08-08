@@ -1,6 +1,7 @@
 #include "upscaler.hpp"
 #include "restart_writer.hpp"
 #include "prolongation.hpp"
+#include "mpi_distribution.hpp"
 #include <iostream>
 #include <cstring>
 #include <limits>
@@ -12,6 +13,7 @@
 Upscaler::Upscaler(RestartReader& reader) : reader_(reader) {
     CalculateFineMeshConfiguration();
     GenerateFineLogicalLocations();
+    SetupFineMPIDistribution();
 }
 
 void Upscaler::CalculateFineMeshConfiguration() {
@@ -45,10 +47,10 @@ void Upscaler::CalculateFineMeshConfiguration() {
     fine_mb_indcs_ = coarse_mb_indcs;
     
     // Each coarse meshblock becomes 2/4/8 fine meshblocks based on dimensionality
-    int nfine_per_coarse = 2;  // 1D
-    if (coarse_mesh_indcs.nx2 > 1) nfine_per_coarse = 4;  // 2D
-    if (coarse_mesh_indcs.nx3 > 1) nfine_per_coarse = 8;  // 3D
-    fine_nmb_total_ = reader_.GetNMBTotal() * nfine_per_coarse;
+    nfine_per_coarse_ = 2;  // 1D
+    if (coarse_mesh_indcs.nx2 > 1) nfine_per_coarse_ = 4;  // 2D
+    if (coarse_mesh_indcs.nx3 > 1) nfine_per_coarse_ = 8;  // 3D
+    fine_nmb_total_ = reader_.GetNMBTotal() * nfine_per_coarse_;
     
     if (reader_.GetMyRank() == 0) {
         std::cout << "\nFine mesh configuration:" << std::endl;
@@ -66,20 +68,22 @@ void Upscaler::GenerateFineLogicalLocations() {
     fine_lloc_eachmb_.resize(fine_nmb_total_);
     fine_cost_eachmb_.resize(fine_nmb_total_);
     
-    // Determine number of fine blocks per coarse block (for 3D it's 8)
+    // Determine number of fine blocks per coarse block
     const RegionIndcs& mesh_indcs = reader_.GetMeshIndcs();
-    int nfine_per_coarse = 8;  // For 3D case
+    int nx_fine = (mesh_indcs.nx3 > 1) ? 2 : 1;  // 2 in each active dimension
+    int ny_fine = (mesh_indcs.nx2 > 1) ? 2 : 1;
+    int nz_fine = 2;  // Always at least 2 in x1 direction
     
-    // For each coarse meshblock, create 8 fine meshblocks (3D case)
+    // For each coarse meshblock, create fine meshblocks
     for (int cmb = 0; cmb < reader_.GetNMBTotal(); cmb++) {
         const LogicalLocation& cloc = coarse_llocs[cmb];
-        float ccost = coarse_costs[cmb] / static_cast<float>(nfine_per_coarse);  // Distribute cost evenly
+        float ccost = coarse_costs[cmb] / static_cast<float>(nfine_per_coarse_);  // Distribute cost evenly
         
-        // Create 8 fine blocks (2x2x2) for each coarse block
-        for (int k = 0; k < 2; k++) {
-            for (int j = 0; j < 2; j++) {
-                for (int i = 0; i < 2; i++) {
-                    int fmb = cmb * 8 + k * 4 + j * 2 + i;
+        // Create fine blocks (2x2x2 for 3D, 2x2x1 for 2D, 2x1x1 for 1D)
+        for (int k = 0; k < nx_fine; k++) {
+            for (int j = 0; j < ny_fine; j++) {
+                for (int i = 0; i < nz_fine; i++) {
+                    int fmb = cmb * nfine_per_coarse_ + k * (ny_fine * nz_fine) + j * nz_fine + i;
                     
                     // Fine logical location has level+1 and doubled indices
                     fine_lloc_eachmb_[fmb].level = cloc.level + 1;
@@ -94,7 +98,47 @@ void Upscaler::GenerateFineLogicalLocations() {
     }
 }
 
-bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
+void Upscaler::SetupFineMPIDistribution() {
+    // Get coarse MPI distribution info
+    int nmb_thisrank = reader_.GetNMBThisRank();
+    
+    // Get starting global ID for coarse meshblocks on this rank
+    // Following AthenaK's pattern from src/outputs/restart.cpp:289-291
+#if MPI_PARALLEL_ENABLED
+    coarse_gids_start_ = reader_.GetMPIDistribution()->GetStartingMeshBlockID(reader_.GetMyRank());
+#else
+    coarse_gids_start_ = 0;
+#endif
+    
+    // Calculate fine meshblock distribution
+    // Each rank gets nfine_per_coarse_ fine MBs for each of its coarse MBs
+    fine_nmb_thisrank_ = nmb_thisrank * nfine_per_coarse_;
+    fine_gids_start_ = coarse_gids_start_ * nfine_per_coarse_;
+    
+    if (reader_.GetMyRank() == 0) {
+        std::cout << "\nFine MPI distribution setup:" << std::endl;
+        std::cout << "  Coarse MBs on this rank: " << nmb_thisrank << std::endl;
+        std::cout << "  Coarse starting global ID: " << coarse_gids_start_ << std::endl;
+        std::cout << "  Fine MBs per coarse MB: " << nfine_per_coarse_ << std::endl;
+        std::cout << "  Fine MBs on this rank: " << fine_nmb_thisrank_ << std::endl;
+        std::cout << "  Fine starting global ID: " << fine_gids_start_ << std::endl;
+    }
+}
+
+int Upscaler::GetGlobalCoarseMBID(int local_mb_id) const {
+    // Convert local meshblock index to global meshblock ID
+    // Following AthenaK's pattern
+    return coarse_gids_start_ + local_mb_id;
+}
+
+int Upscaler::GetLocalFineMBIndex(int local_coarse_mb, int fine_mb_within_coarse) const {
+    // Get the local index in the fine data arrays for a given fine meshblock
+    // local_coarse_mb: local index of the coarse meshblock (0 to nmb_thisrank-1)
+    // fine_mb_within_coarse: which fine MB within the coarse MB (0 to nfine_per_coarse_-1)
+    return local_coarse_mb * nfine_per_coarse_ + fine_mb_within_coarse;
+}
+
+bool Upscaler::UpscaleMeshBlock(int local_coarse_mb_id, int local_fine_mb_start_id,
                                const Real* coarse_data, Real* fine_data,
                                int nvars, bool is_face_centered, int face_dir) {
     const RegionIndcs& mb_indcs = reader_.GetMBIndcs();
@@ -111,21 +155,34 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
     bool multi_d = (cnx2 > 1);
     bool three_d = (cnx3 > 1);
     
+    // Calculate actual number of fine meshblocks based on dimensionality
+    int nfine_actual = nfine_per_coarse_;
+    
     // Process each variable
     for (int v = 0; v < nvars; v++) {
         // Get pointer to coarse data for this variable
         const Real* coarse_var = coarse_data + v * cnx3_tot * cnx2_tot * cnx1_tot;
         
-        // For each of the 8 fine meshblocks
-        for (int fmb = 0; fmb < 8; fmb++) {
-            int fk_offset = (fmb / 4) * cnx3;
-            int fj_offset = ((fmb / 2) % 2) * cnx2;
-            int fi_offset = (fmb % 2) * cnx1;
+        // For each of the fine meshblocks (2/4/8 depending on dimensionality)
+        for (int fmb = 0; fmb < nfine_actual; fmb++) {
+            // Calculate offsets based on dimensionality
+            int fk_offset = 0, fj_offset = 0, fi_offset = 0;
+            if (three_d) {
+                fk_offset = (fmb / 4) * cnx3;
+                fj_offset = ((fmb / 2) % 2) * cnx2;
+                fi_offset = (fmb % 2) * cnx1;
+            } else if (multi_d) {
+                fj_offset = (fmb / 2) * cnx2;
+                fi_offset = (fmb % 2) * cnx1;
+            } else {
+                fi_offset = fmb * cnx1;
+            }
             
-            // Get pointer to fine data for this meshblock and variable
-            // Use size_t for all calculations to avoid integer overflow
+            // Get pointer to fine data for this LOCAL meshblock and variable
+            // Now using local indexing!
             size_t cells_per_mb_size = static_cast<size_t>(cnx3_tot) * cnx2_tot * cnx1_tot;
-            size_t mb_offset = static_cast<size_t>(fine_mb_start_id + fmb) * nvars * cells_per_mb_size;
+            size_t local_fine_mb_id = local_fine_mb_start_id + fmb;
+            size_t mb_offset = local_fine_mb_id * nvars * cells_per_mb_size;
             size_t var_offset = static_cast<size_t>(v) * cells_per_mb_size;
             size_t fine_offset = mb_offset + var_offset;
             Real* fine_var = fine_data + fine_offset;
@@ -194,7 +251,7 @@ bool Upscaler::UpscaleMeshBlock(int coarse_mb_id, int fine_mb_start_id,
     return true;
 }
 
-bool Upscaler::UpscaleFaceCenteredData(int coarse_mb_id, int fine_mb_start_id,
+bool Upscaler::UpscaleFaceCenteredData(int local_coarse_mb_id, int local_fine_mb_start_id,
                                       const Real* coarse_x1f, const Real* coarse_x2f, const Real* coarse_x3f,
                                       Real* fine_x1f, Real* fine_x2f, Real* fine_x3f) {
     const RegionIndcs& mb_indcs = reader_.GetMBIndcs();
@@ -221,24 +278,27 @@ bool Upscaler::UpscaleFaceCenteredData(int coarse_mb_id, int fine_mb_start_id,
     int cjs = cng, cje = cng + cnx2 - 1;
     int cks = cng, cke = cng + cnx3 - 1;
     
-    if (reader_.GetMyRank() == 0 && coarse_mb_id == 0) {
+    if (reader_.GetMyRank() == 0 && local_coarse_mb_id == 0) {
         std::cout << "DEBUG UPSCALE: cnx1=" << cnx1 << " cnx2=" << cnx2 << " cnx3=" << cnx3 << " cng=" << cng << std::endl;
         std::cout << "DEBUG UPSCALE: cnx1_tot=" << cnx1_tot << " cnx2_tot=" << cnx2_tot << " cnx3_tot=" << cnx3_tot << std::endl;
         std::cout << "DEBUG UPSCALE: x1f_size=" << x1f_size << " x2f_size=" << x2f_size << " x3f_size=" << x3f_size << std::endl;
         std::cout << "DEBUG UPSCALE: cis=" << cis << " cie=" << cie << " cjs=" << cjs << " cje=" << cje << " cks=" << cks << " cke=" << cke << std::endl;
     }
     
-    // Process each of the 8 fine meshblocks
-    for (int fmb = 0; fmb < 8; fmb++) {
+    // Process each of the fine meshblocks (2/4/8 depending on dimensionality)
+    int nfine_actual = nfine_per_coarse_;
+    for (int fmb = 0; fmb < nfine_actual; fmb++) {
         // Determine the position of this fine meshblock within the coarse meshblock
         int fmb_k = (fmb / 4);      // 0 or 1 in k direction
         int fmb_j = ((fmb / 2) % 2); // 0 or 1 in j direction  
         int fmb_i = (fmb % 2);       // 0 or 1 in i direction
         
-        // Get pointers to fine face data for this meshblock
-        Real* fine_mb_x1f = fine_x1f + (fine_mb_start_id + fmb) * x1f_size;
-        Real* fine_mb_x2f = fine_x2f + (fine_mb_start_id + fmb) * x2f_size;
-        Real* fine_mb_x3f = fine_x3f + (fine_mb_start_id + fmb) * x3f_size;
+        // Get pointers to fine face data for this LOCAL meshblock
+        // Using local indexing now!
+        size_t local_fine_mb_id = local_fine_mb_start_id + fmb;
+        Real* fine_mb_x1f = fine_x1f + local_fine_mb_id * x1f_size;
+        Real* fine_mb_x2f = fine_x2f + local_fine_mb_id * x2f_size;
+        Real* fine_mb_x3f = fine_x3f + local_fine_mb_id * x3f_size;
         
         // STEP 1: Prolongate shared faces between coarse and fine cells
         // Following AthenaK's logic from mesh_refinement.cpp
@@ -435,29 +495,31 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
         }
     }
     
-    // Allocate storage for fine data
+    // Allocate storage for fine data - ONLY FOR LOCAL MESHBLOCKS
+    // Following AthenaK's pattern of allocating only for rank's assigned meshblocks
     if (phys_config.has_hydro) {
-        fine_hydro_data_.resize(fine_nmb_total_ * phys_config.nhydro * cells_per_mb);
+        fine_hydro_data_.resize(fine_nmb_thisrank_ * phys_config.nhydro * cells_per_mb);
     }
     if (phys_config.has_mhd) {
-        fine_mhd_data_.resize(fine_nmb_total_ * phys_config.nmhd * cells_per_mb);
+        fine_mhd_data_.resize(fine_nmb_thisrank_ * phys_config.nmhd * cells_per_mb);
         
-        // Initialize face-centered arrays and explicitly set to zero
-        size_t x1f_total_size = fine_nmb_total_ * cnx3_tot * cnx2_tot * (cnx1_tot + 1);
-        size_t x2f_total_size = fine_nmb_total_ * cnx3_tot * (cnx2_tot + 1) * cnx1_tot;
-        size_t x3f_total_size = fine_nmb_total_ * (cnx3_tot + 1) * cnx2_tot * cnx1_tot;
+        // Initialize face-centered arrays for LOCAL meshblocks only
+        size_t x1f_local_size = fine_nmb_thisrank_ * cnx3_tot * cnx2_tot * (cnx1_tot + 1);
+        size_t x2f_local_size = fine_nmb_thisrank_ * cnx3_tot * (cnx2_tot + 1) * cnx1_tot;
+        size_t x3f_local_size = fine_nmb_thisrank_ * (cnx3_tot + 1) * cnx2_tot * cnx1_tot;
         
-        fine_x1f_data_.assign(x1f_total_size, 0.0);
-        fine_x2f_data_.assign(x2f_total_size, 0.0);
-        fine_x3f_data_.assign(x3f_total_size, 0.0);
+        fine_x1f_data_.assign(x1f_local_size, 0.0);
+        fine_x2f_data_.assign(x2f_local_size, 0.0);
+        fine_x3f_data_.assign(x3f_local_size, 0.0);
         
         if (reader_.GetMyRank() == 0) {
-            std::cout << "DEBUG: Allocated face arrays - x1f_size=" << x1f_total_size 
-                      << " x2f_size=" << x2f_total_size << " x3f_size=" << x3f_total_size << std::endl;
+            std::cout << "DEBUG: Allocated LOCAL face arrays - x1f_size=" << x1f_local_size 
+                      << " x2f_size=" << x2f_local_size << " x3f_size=" << x3f_local_size 
+                      << " for " << fine_nmb_thisrank_ << " local fine meshblocks" << std::endl;
         }
     }
     if (phys_config.has_turbulence) {
-        fine_turb_data_.resize(fine_nmb_total_ * phys_config.nforce * cells_per_mb);
+        fine_turb_data_.resize(fine_nmb_thisrank_ * phys_config.nforce * cells_per_mb);
     }
     // Add other physics as needed...
     
@@ -465,23 +527,25 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
         std::cout << "\nStarting upscaling process..." << std::endl;
     }
     
-    // Process each coarse meshblock
+    // Process each LOCAL coarse meshblock
+    // Following AthenaK's pattern where each rank only processes its assigned meshblocks
     int nmb_local = reader_.GetNMBThisRank();
-    int nfine_per_coarse = 8;  // For 3D case
     for (int local_mb = 0; local_mb < nmb_local; local_mb++) {
-        // For now, assume global_mb = local_mb (no MPI distribution)
-        int global_mb = local_mb;
-        int fine_mb_start = global_mb * nfine_per_coarse;
+        // Convert local index to global ID for tracking
+        int global_coarse_mb = GetGlobalCoarseMBID(local_mb);
+        // Local fine meshblock starting index for this coarse meshblock
+        int local_fine_mb_start = local_mb * nfine_per_coarse_;
         
         if (reader_.GetMyRank() == 0 && local_mb % 10 == 0) {
-            std::cout << "  Processing meshblock " << local_mb << "/" << nmb_local << std::endl;
+            std::cout << "  Processing local meshblock " << local_mb << "/" << nmb_local 
+                      << " (global ID: " << global_coarse_mb << ")" << std::endl;
         }
         
         // Upscale hydro data
         if (phys_config.has_hydro && phys_reader->GetHydroData().size() > local_mb) {
             const Real* coarse_hydro = phys_reader->GetHydroData()[local_mb].data();
             Real* fine_hydro = fine_hydro_data_.data();
-            UpscaleMeshBlock(global_mb, fine_mb_start, coarse_hydro, fine_hydro, phys_config.nhydro);
+            UpscaleMeshBlock(local_mb, local_fine_mb_start, coarse_hydro, fine_hydro, phys_config.nhydro);
         }
         
         // Upscale MHD data
@@ -491,7 +555,7 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
             
             // DEBUG: Print coarse MHD data before upscaling
             if (reader_.GetMyRank() == 0 && local_mb == 0) {
-                std::cout << "\n=== DEBUG: COARSE MHD DATA (MeshBlock " << global_mb << ") ===" << std::endl;
+                std::cout << "\n=== DEBUG: COARSE MHD DATA (MeshBlock " << global_coarse_mb << ") ===" << std::endl;
                 const RegionIndcs& mb_indcs = reader_.GetMBIndcs();
                 int cells_per_mb = (mb_indcs.nx1 + 2*mb_indcs.ng) * (mb_indcs.nx2 + 2*mb_indcs.ng) * (mb_indcs.nx3 + 2*mb_indcs.ng);
                 
@@ -506,7 +570,7 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
                 }
             }
             
-            UpscaleMeshBlock(global_mb, fine_mb_start, coarse_mhd, fine_mhd, phys_config.nmhd);
+            UpscaleMeshBlock(local_mb, local_fine_mb_start, coarse_mhd, fine_mhd, phys_config.nmhd);
             
             // DEBUG: Print fine MHD data after upscaling (only for first meshblock)
             if (reader_.GetMyRank() == 0 && local_mb == 0) {
@@ -552,7 +616,7 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
                 std::cout << std::endl;
             }
             
-            UpscaleFaceCenteredData(global_mb, fine_mb_start,
+            UpscaleFaceCenteredData(local_mb, local_fine_mb_start,
                                     coarse_x1f, coarse_x2f, coarse_x3f,
                                     fine_x1f, fine_x2f, fine_x3f);
                                    
@@ -560,19 +624,21 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
             if (reader_.GetMyRank() == 0 && local_mb == 0) {
                 std::cout << "Fine face-centered B-field data after upscaling:" << std::endl;
                 
-                // Print data for each of the 8 fine meshblocks
-                for (int fmb = 0; fmb < 8; fmb++) {
+                // Print data for each of the fine meshblocks  
+                for (int fmb = 0; fmb < nfine_per_coarse_; fmb++) {
                     std::cout << "  Fine meshblock " << fmb << " (first 5 faces):" << std::endl;
                     
-                    // Calculate offsets for this fine meshblock
+                    // Calculate offsets for this LOCAL fine meshblock
                     // Calculate face sizes based on mesh dimensions
                     int x1f_size_local = cnx3_tot * cnx2_tot * (cnx1_tot + 1);
                     int x2f_size_local = cnx3_tot * (cnx2_tot + ((cnx2 > 1) ? 1 : 0)) * cnx1_tot;
                     int x3f_size_local = (cnx3_tot + ((cnx3 > 1) ? 1 : 0)) * cnx2_tot * cnx1_tot;
                     
-                    int x1f_offset = (fine_mb_start + fmb) * x1f_size_local;
-                    int x2f_offset = (fine_mb_start + fmb) * x2f_size_local;
-                    int x3f_offset = (fine_mb_start + fmb) * x3f_size_local;
+                    // Use local indexing
+                    int local_fine_mb_id = local_fine_mb_start + fmb;
+                    int x1f_offset = local_fine_mb_id * x1f_size_local;
+                    int x2f_offset = local_fine_mb_id * x2f_size_local;
+                    int x3f_offset = local_fine_mb_id * x3f_size_local;
                     
                     std::cout << "    Bx (x1f): ";
                     for (int i = 0; i < 5; i++) {
@@ -600,7 +666,7 @@ bool Upscaler::UpscaleRestartFile(const std::string& output_filename) {
         if (phys_config.has_turbulence && phys_reader->GetTurbData().size() > local_mb) {
             const Real* coarse_turb = phys_reader->GetTurbData()[local_mb].data();
             Real* fine_turb = fine_turb_data_.data();
-            UpscaleMeshBlock(global_mb, fine_mb_start, coarse_turb, fine_turb, phys_config.nforce);
+            UpscaleMeshBlock(local_mb, local_fine_mb_start, coarse_turb, fine_turb, phys_config.nforce);
         }
     }
     

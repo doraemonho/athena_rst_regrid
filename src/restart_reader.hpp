@@ -46,6 +46,7 @@ public:
     const std::vector<float>& GetCostEachMB() const { return cost_eachmb_; }
     const PhysicsConfig& GetPhysicsConfig() const { return physics_config_; }
     PhysicsReader* GetPhysicsReader() const { return physics_reader_.get(); }
+    const MPIDistribution* GetMPIDistribution() const { return mpi_dist_.get(); }
     const std::string& GetParameterString() const { return parameter_string_; }
     
     // Accessors for internal state data

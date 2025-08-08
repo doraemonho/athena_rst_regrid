@@ -20,13 +20,32 @@ RestartWriter::RestartWriter(RestartReader& reader, Upscaler& upscaler)
     my_rank_ = reader_.GetMyRank();
     nranks_ = reader_.GetNRanks();
     
-    // Setup MPI distribution for the upscaled mesh
+    // Use the upscaler's fine mesh distribution
+    // Each rank has already upscaled its assigned coarse meshblocks
     size_t fine_nmb_total = GetFineNMBTotal();
-    mpi_dist_ = std::make_unique<MPIDistribution>(nranks_, fine_nmb_total);
-    mpi_dist_->SetupDistribution(nullptr, nullptr);  // Use automatic load balancing
+    nmb_thisrank_ = upscaler_.fine_nmb_thisrank_;
     
-    // Get distribution info
-    nmb_thisrank_ = mpi_dist_->GetNumMeshBlocks(my_rank_);
+    // Setup MPI distribution that matches what upscaler created
+    // Each rank gets nfine_per_coarse_ fine MBs for each of its coarse MBs
+    mpi_dist_ = std::make_unique<MPIDistribution>(nranks_, fine_nmb_total);
+    
+    // Calculate gids and nmb for each rank based on upscaler's distribution
+    std::vector<int> gids_eachrank(nranks_);
+    std::vector<int> nmb_eachrank(nranks_);
+    
+#if MPI_PARALLEL_ENABLED
+    // Gather the fine mesh distribution from all ranks
+    int my_fine_start = upscaler_.fine_gids_start_;
+    int my_fine_count = upscaler_.fine_nmb_thisrank_;
+    
+    MPI_Allgather(&my_fine_start, 1, MPI_INT, gids_eachrank.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(&my_fine_count, 1, MPI_INT, nmb_eachrank.data(), 1, MPI_INT, MPI_COMM_WORLD);
+#else
+    gids_eachrank[0] = 0;
+    nmb_eachrank[0] = fine_nmb_total;
+#endif
+    
+    mpi_dist_->SetupDistribution(&gids_eachrank, &nmb_eachrank);
     mpi_dist_->GetRankMinMax(&noutmbs_min_, &noutmbs_max_);
     
     if (my_rank_ == 0) {
