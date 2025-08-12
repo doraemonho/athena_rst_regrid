@@ -235,8 +235,6 @@ bool RestartWriter::WriteParameterData() {
     }
     
 #if MPI_PARALLEL_ENABLED
-    // Ensure all ranks wait for rank 0 to finish writing parameters
-    MPI_Barrier(MPI_COMM_WORLD);
     // Broadcast header offset to all ranks
     MPI_Bcast(&header_offset_, sizeof(IOWrapperSizeT), MPI_BYTE, 0, MPI_COMM_WORLD);
 #endif
@@ -280,10 +278,6 @@ bool RestartWriter::WriteHeaderData() {
         file_.Write_any_type(&ncycle, sizeof(int), "byte");
     }
     
-#if MPI_PARALLEL_ENABLED
-    // Ensure all ranks wait for rank 0 to finish writing header
-    MPI_Barrier(MPI_COMM_WORLD);
-#endif
     
     return true;
 }
@@ -326,10 +320,6 @@ bool RestartWriter::WriteInternalState() {
         }
     }
     
-#if MPI_PARALLEL_ENABLED
-    // Ensure all ranks wait for rank 0 to finish writing internal state
-    MPI_Barrier(MPI_COMM_WORLD);
-#endif
     
     return true;
 }
@@ -377,10 +367,6 @@ bool RestartWriter::WritePhysicsData() {
         file_.Write_any_type(&data_size, sizeof(IOWrapperSizeT), "byte");
     }
     
-#if MPI_PARALLEL_ENABLED
-    // Ensure all ranks wait for rank 0 to write data size
-    MPI_Barrier(MPI_COMM_WORLD);
-#endif
     
     // Calculate offset sizes following AthenaK's pattern (src/outputs/restart.cpp:267-278)
     IOWrapperSizeT step1size = header_offset_;  // Parameter data size
@@ -409,15 +395,16 @@ bool RestartWriter::WritePhysicsData() {
         for (int m = 0; m < noutmbs_max_; ++m) {
             // Every rank has a MB to write, so write collectively
             if (m < noutmbs_min_) {
-                if (m < nmb_thisrank_) {
-                    const Real* mb_data = hydro_data + m * phys_config.nhydro * cells_per_mb;
-                    IOWrapperSizeT mbcnt = phys_config.nhydro * cells_per_mb;
-                    if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
-                        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                                  << std::endl << "cell-centered hydro data not written correctly to rst file, "
-                                  << "restart file is broken." << std::endl;
-                        return false;
-                    }
+                // ALL ranks participate in collective write - get data pointer safely
+                const Real* mb_data = (m < nmb_thisrank_) ? 
+                    hydro_data + m * phys_config.nhydro * cells_per_mb : nullptr;
+                IOWrapperSizeT mbcnt = (m < nmb_thisrank_) ? 
+                    phys_config.nhydro * cells_per_mb : 0;
+                if (file_.Write_any_type_at_all(mb_data, mbcnt, myoffset, "Real") != mbcnt) {
+                    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                              << std::endl << "cell-centered hydro data not written correctly to rst file, "
+                              << "restart file is broken." << std::endl;
+                    exit(EXIT_FAILURE);
                 }
                 myoffset += data_size;
             // Some ranks are finished writing, so use non-collective write
@@ -695,10 +682,6 @@ bool RestartWriter::WritePhysicsData() {
         myoffset = offset_myrank;
     }
     
-#if MPI_PARALLEL_ENABLED
-    // Ensure all ranks finish writing
-    MPI_Barrier(MPI_COMM_WORLD);
-#endif
     
     return true;
 }

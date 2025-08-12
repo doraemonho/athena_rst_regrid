@@ -174,7 +174,7 @@ bool RestartReader::ReadParameterData() {
     ShowParameterSample(parameter_string_);
     
     physics_config_ = ParameterParser::ParseParameters(parameter_string_);
-    
+
     if (my_rank_ == 0) {
         std::cout << "Parameter data size: " << header << " bytes" << std::endl;
     }
@@ -182,7 +182,8 @@ bool RestartReader::ReadParameterData() {
 }
 
 bool RestartReader::ReadHeaderData() {
-    std::cout << "Reading header data..." << std::endl;
+    if (my_rank_ == 0) 
+        std::cout << "Reading header data..." << std::endl;
     
     // Read fixed-size header data following build_tree.cpp:BuildTreeFromRestart() - MPI-aware
     IOWrapperSizeT headersize = 3*sizeof(int) + 2*sizeof(Real) + 
@@ -228,17 +229,21 @@ bool RestartReader::ReadHeaderData() {
     nout2_ = (mb_indcs_.nx2 > 1) ? (mb_indcs_.nx2 + 2 * mb_indcs_.ng) : 1;
     nout3_ = (mb_indcs_.nx3 > 1) ? (mb_indcs_.nx3 + 2 * mb_indcs_.ng) : 1;
     
-    std::cout << "Header data read successfully:" << std::endl;
-    std::cout << "  Total MeshBlocks: " << nmb_total_ << std::endl;
-    std::cout << "  Root level: " << root_level_ << std::endl;
-    std::cout << "  Time: " << time_ << std::endl;
-    std::cout << "  Grid dimensions (with ghosts): " << nout1_ << " x " << nout2_ << " x " << nout3_ << std::endl;
-    
+    if (my_rank_ == 0) {
+        std::cout << "Header data read successfully:" << std::endl;
+        std::cout << "  Total MeshBlocks: " << nmb_total_ << std::endl;
+        std::cout << "  Root level: " << root_level_ << std::endl;
+        std::cout << "  Time: " << time_ << std::endl;
+        std::cout << "  Grid dimensions (with ghosts): " << nout1_ << " x " << nout2_ << " x " << nout3_ << std::endl;
+    }
     return true;
 }
 
 bool RestartReader::ReadMeshBlockLists() {
-    std::cout << "Reading MeshBlock lists..." << std::endl;
+
+    if (my_rank_ == 0) {
+        std::cout << "Reading MeshBlock lists..." << std::endl;
+    }
     
     // Read logical locations and costs - MPI-aware
     IOWrapperSizeT listsize = sizeof(LogicalLocation) + sizeof(float);
@@ -270,13 +275,18 @@ bool RestartReader::ReadMeshBlockLists() {
         os += sizeof(float);
     }
     
-    std::cout << "MeshBlock lists read successfully" << std::endl;
+    if (my_rank_ == 0)             
+       std::cout << "MeshBlock lists read successfully" << std::endl;
+
     return true;
 }
 
 bool RestartReader::ReadInternalState() {
-    std::cout << "Reading internal state data..." << std::endl;
-    std::cout << "Current position: " << file_.GetPosition() << std::endl;
+
+    if (my_rank_ == 0) {           
+        std::cout << "Reading internal state data..." << std::endl;
+        std::cout << "Current position: " << file_.GetPosition() << std::endl;
+    }
 
     // Read and store Z4c data if present - MPI-aware
     if (physics_config_.has_z4c) {
@@ -319,13 +329,14 @@ bool RestartReader::ReadInternalState() {
 #endif
     }
     
-    std::cout << "Internal state data processed" << std::endl;
-    std::cout << "Current position: " << file_.GetPosition() << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "Internal state data processed" << std::endl;
+        std::cout << "Current position: " << file_.GetPosition() << std::endl;
+    }
     return true;
 }
 
 bool RestartReader::SetupPhysicsReader() {
-    std::cout << "Setting up physics reader..." << std::endl;
     
     physics_reader_ = std::make_unique<PhysicsReader>(
         file_, physics_config_, *mpi_dist_, my_rank_, nout1_, nout2_, nout3_);
@@ -338,51 +349,56 @@ bool RestartReader::SetupPhysicsReader() {
 #if MPI_PARALLEL_ENABLED
     MPI_Bcast(&physics_start, sizeof(IOWrapperSizeT), MPI_BYTE, 0, MPI_COMM_WORLD);
 #endif
-    std::cout << "Rank " << my_rank_ << ": physics_start=" << physics_start << std::endl;
+
     return physics_reader_->ReadPhysicsData(physics_start, data_size);
 }
 
 void RestartReader::ShowParameterSample(const std::string& param_string) const {
-    std::cout << "Parameter string sample (first 5000 chars):" << std::endl;
-    std::string sample = param_string.substr(0, 5000);
-    std::cout << sample << std::endl;
-    if (param_string.length() > 5000) std::cout << "..." << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "Parameter string sample (first 5000 chars):" << std::endl;
+        std::string sample = param_string.substr(0, 5000);
+        std::cout << sample << std::endl;
+        if (param_string.length() > 5000) std::cout << "..." << std::endl;
+    }
+    return;
 }
 
 void RestartReader::DisplayMeshInfo() const {
-    std::cout << "\n" << std::string(60, '=') << std::endl;
-    std::cout << "RESTART FILE INFORMATION" << std::endl;
-    std::cout << std::string(60, '=') << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "RESTART FILE INFORMATION" << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
     
-    std::cout << "File: " << filename_ << std::endl;
-    std::cout << "Time: " << std::scientific << std::setprecision(6) << time_ << std::endl;
-    std::cout << "Timestep: " << std::scientific << std::setprecision(6) << dt_ << std::endl;
-    std::cout << "Cycle: " << ncycle_ << std::endl;
-    std::cout << "Total MeshBlocks: " << nmb_total_ << std::endl;
-    std::cout << "Root level: " << root_level_ << std::endl;
-    
-    std::cout << "\nMesh dimensions:" << std::endl;
-    std::cout << "  Physical domain: [" << mesh_size_.x1min << ", " << mesh_size_.x1max << "] x ["
-              << mesh_size_.x2min << ", " << mesh_size_.x2max << "] x ["
-              << mesh_size_.x3min << ", " << mesh_size_.x3max << "]" << std::endl;
-    std::cout << "  Grid spacing: " << mesh_size_.dx1 << " x " << mesh_size_.dx2 << " x " << mesh_size_.dx3 << std::endl;
-    std::cout << "  Mesh cells: " << mesh_indcs_.nx1 << " x " << mesh_indcs_.nx2 << " x " << mesh_indcs_.nx3 << std::endl;
-    std::cout << "  MeshBlock cells: " << mb_indcs_.nx1 << " x " << mb_indcs_.nx2 << " x " << mb_indcs_.nx3 << std::endl;
-    std::cout << "  Ghost cells: " << mb_indcs_.ng << std::endl;
-    std::cout << "  Output dimensions: " << nout1_ << " x " << nout2_ << " x " << nout3_ << std::endl;
-    
-    std::cout << "\nPhysics modules:" << std::endl;
-    std::cout << "  Hydro: " << (physics_config_.has_hydro ? "Yes" : "No") << " (nhydro=" << physics_config_.nhydro << ")" << std::endl;
-    std::cout << "  MHD: " << (physics_config_.has_mhd ? "Yes" : "No") << " (nmhd=" << physics_config_.nmhd << ")" << std::endl;
-    std::cout << "  Turbulence: " << (physics_config_.has_turbulence ? "Yes" : "No") << " (nforce=" << physics_config_.nforce << ")" << std::endl;
-    std::cout << "  Radiation: " << (physics_config_.has_radiation ? "Yes" : "No") << std::endl;
-    std::cout << "  Z4c: " << (physics_config_.has_z4c ? "Yes" : "No") << std::endl;
-    
-    if (mpi_dist_) {
-        std::cout << "\nMPI Information:" << std::endl; 
-        std::cout << "  My rank: " << my_rank_ << " / " << nranks_ << std::endl;
-        std::cout << "  MeshBlocks for this rank: " << GetNMBThisRank() << std::endl;
-        mpi_dist_->PrintDistribution();
+        std::cout << "File: " << filename_ << std::endl;
+        std::cout << "Time: " << std::scientific << std::setprecision(6) << time_ << std::endl;
+        std::cout << "Timestep: " << std::scientific << std::setprecision(6) << dt_ << std::endl;
+        std::cout << "Cycle: " << ncycle_ << std::endl;
+        std::cout << "Total MeshBlocks: " << nmb_total_ << std::endl;
+        std::cout << "Root level: " << root_level_ << std::endl;
+        
+        std::cout << "\nMesh dimensions:" << std::endl;
+        std::cout << "  Physical domain: [" << mesh_size_.x1min << ", " << mesh_size_.x1max << "] x ["
+                << mesh_size_.x2min << ", " << mesh_size_.x2max << "] x ["
+                << mesh_size_.x3min << ", " << mesh_size_.x3max << "]" << std::endl;
+        std::cout << "  Grid spacing: " << mesh_size_.dx1 << " x " << mesh_size_.dx2 << " x " << mesh_size_.dx3 << std::endl;
+        std::cout << "  Mesh cells: " << mesh_indcs_.nx1 << " x " << mesh_indcs_.nx2 << " x " << mesh_indcs_.nx3 << std::endl;
+        std::cout << "  MeshBlock cells: " << mb_indcs_.nx1 << " x " << mb_indcs_.nx2 << " x " << mb_indcs_.nx3 << std::endl;
+        std::cout << "  Ghost cells: " << mb_indcs_.ng << std::endl;
+        std::cout << "  Output dimensions: " << nout1_ << " x " << nout2_ << " x " << nout3_ << std::endl;
+        
+        std::cout << "\nPhysics modules:" << std::endl;
+        std::cout << "  Hydro: " << (physics_config_.has_hydro ? "Yes" : "No") << " (nhydro=" << physics_config_.nhydro << ")" << std::endl;
+        std::cout << "  MHD: " << (physics_config_.has_mhd ? "Yes" : "No") << " (nmhd=" << physics_config_.nmhd << ")" << std::endl;
+        std::cout << "  Turbulence: " << (physics_config_.has_turbulence ? "Yes" : "No") << " (nforce=" << physics_config_.nforce << ")" << std::endl;
+        std::cout << "  Radiation: " << (physics_config_.has_radiation ? "Yes" : "No") << std::endl;
+        std::cout << "  Z4c: " << (physics_config_.has_z4c ? "Yes" : "No") << std::endl;
+        
+        if (mpi_dist_) {
+            std::cout << "\nMPI Information:" << std::endl; 
+            std::cout << "  My rank: " << my_rank_ << " / " << nranks_ << std::endl;
+            std::cout << "  MeshBlocks for this rank: " << GetNMBThisRank() << std::endl;
+            mpi_dist_->PrintDistribution();
+        }
     }
 }
 
@@ -390,7 +406,7 @@ void RestartReader::DisplayPhysicsData(int local_meshblock_id) const {
     if (physics_reader_) {
         physics_reader_->DisplayPhysicsData(local_meshblock_id);
     } else {
-        std::cout << "No physics data available" << std::endl;
+        std::cerr << "ERROR: No physics data available" << std::endl;
     }
 }
 
@@ -398,6 +414,6 @@ void RestartReader::ValidateUniformValues() const {
     if (physics_reader_) {
         physics_reader_->ValidateUniformValues();
     } else {
-        std::cout << "No physics data available for validation" << std::endl;
+        std::cerr << "ERROR: No physics data available for validation" << std::endl;
     }
 }

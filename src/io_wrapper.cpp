@@ -49,6 +49,7 @@ int IOWrapper::Open(const char* fname, FileMode rw) {
   // open file for writes
   } else if (rw == FileMode::write) {
 #if MPI_PARALLEL_ENABLED
+    MPI_File_delete(fname, MPI_INFO_NULL); // truncation
     int errcode = MPI_File_open(comm_, fname, MPI_MODE_WRONLY | MPI_MODE_CREATE,
                                 MPI_INFO_NULL, &fh_);
     if (errcode != MPI_SUCCESS) {

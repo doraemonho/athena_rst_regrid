@@ -14,11 +14,9 @@ void MPIDistribution::SetupDistribution(const std::vector<int>* gids_eachrank,
         // Use provided MPI distribution (from external load balancing)
         gids_eachrank_ = *gids_eachrank;
         nmb_eachrank_ = *nmb_eachrank;
-        std::cout << "Using provided MPI distribution" << std::endl;
     } else {
         // Implement AthenaK's load balancing logic
         LoadBalance();
-        std::cout << "Using automatic load balancing" << std::endl;
     }
 }
 
