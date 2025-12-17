@@ -89,9 +89,9 @@ make -j$(nproc)
 # Success message
 echo
 echo "=== Build Complete ==="
-echo "Executables built:"
-echo "  restart_reader - Main restart file reader"
-echo "  debug_mpi      - MPI debugging utility"
+echo "Artifacts built:"
+echo "  restart_reader         - Main CLI"
+echo "  librestart_reader_lib.a - Static library (internal use)"
 echo
 echo "To install: make install"
 echo "To test: ./restart_reader <restart_file.rst>"

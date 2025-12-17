@@ -1,4 +1,5 @@
 #include "restart_reader.hpp"
+#include "downsampler.hpp"
 #include "upscaler.hpp"
 #include <iostream>
 #include <cstdlib>
@@ -11,15 +12,27 @@
 
 void PrintUsage(const char* prog_name, int my_rank) {
     if (my_rank == 0) {
-        std::cerr << "Usage: " << prog_name << " <restart_file.rst> [options]" << std::endl;
+        std::cerr << "Usage: " << prog_name << " <restart_file.rst> [options]"
+                  << std::endl;
         std::cerr << "Options:" << std::endl;
-        std::cerr << "  --upscale <output.rst>  : Upscale from N³ to (2N)³ resolution" << std::endl;
+        std::cerr << "  --upscale <output.rst>  : Upscale from N³ to (2N)³ resolution"
+                  << std::endl;
+        std::cerr << "  --downsample-bin <output.bin> : Downsample to (N/2)³ and write"
+                  << " AthenaK .bin" << std::endl;
         std::cerr << "Examples:" << std::endl;
-        std::cerr << "  Read mode:    " << prog_name << " ../debeg_rst/OutputTest.00000.rst" << std::endl;
-        std::cerr << "  Upscale mode: " << prog_name << " input.rst --upscale output.rst" << std::endl;
+        std::cerr << "  Read mode:    " << prog_name
+                  << " ../debeg_rst/OutputTest.00000.rst" << std::endl;
+        std::cerr << "  Upscale mode: " << prog_name << " input.rst --upscale output.rst"
+                  << std::endl;
+        std::cerr << "  Downsample:   " << prog_name
+                  << " input.rst --downsample-bin output.bin" << std::endl;
 #if MPI_PARALLEL_ENABLED
-        std::cerr << "  MPI read:     mpirun -np 4 " << prog_name << " input.rst" << std::endl;
-        std::cerr << "  MPI upscale:  mpirun -np 4 " << prog_name << " input.rst --upscale output.rst" << std::endl;
+        std::cerr << "  MPI read:     mpirun -np 4 " << prog_name << " input.rst"
+                  << std::endl;
+        std::cerr << "  MPI upscale:  mpirun -np 4 " << prog_name
+                  << " input.rst --upscale output.rst" << std::endl;
+        std::cerr << "  MPI down:     mpirun -np 4 " << prog_name
+                  << " input.rst --downsample-bin output.bin" << std::endl;
 #endif
     }
 }
@@ -60,6 +73,7 @@ int main(int argc, char* argv[]) {
     
     std::string filename = argv[1];
     bool upscale_mode = false;
+    bool downsample_mode = false;
     std::string output_filename;
     
     // Check for upscale option
@@ -67,7 +81,8 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--upscale") == 0) {
             if (i + 1 >= argc) {
                 if (my_rank == 0) {
-                    std::cerr << "Error: --upscale requires an output filename" << std::endl;
+                    std::cerr << "Error: --upscale requires an output filename"
+                              << std::endl;
                 }
                 PrintUsage(argv[0], my_rank);
 #if MPI_PARALLEL_ENABLED
@@ -78,14 +93,41 @@ int main(int argc, char* argv[]) {
             upscale_mode = true;
             output_filename = argv[i + 1];
             i++; // Skip the next argument
+        } else if (std::strcmp(argv[i], "--downsample-bin") == 0) {
+            if (i + 1 >= argc) {
+                if (my_rank == 0) {
+                    std::cerr << "Error: --downsample-bin requires an output filename"
+                              << std::endl;
+                }
+                PrintUsage(argv[0], my_rank);
+#if MPI_PARALLEL_ENABLED
+                MPI_Finalize();
+#endif
+                return 1;
+            }
+            downsample_mode = true;
+            output_filename = argv[i + 1];
+            i++; // Skip the next argument
         }
     }
     
     if (my_rank == 0) {
         std::cout << "=== AthenaK Restart Reader with MPI Support ===" << std::endl;
         std::cout << "Running with " << nranks << " MPI rank(s)" << std::endl;
+        if (upscale_mode && downsample_mode) {
+            std::cerr << "Error: cannot use --upscale and --downsample-bin together"
+                      << std::endl;
+#if MPI_PARALLEL_ENABLED
+            MPI_Finalize();
+#endif
+            return 1;
+        }
         if (upscale_mode) {
             std::cout << "Mode: UPSCALING from N³ to (2N)³" << std::endl;
+            std::cout << "Output file: " << output_filename << std::endl;
+        } else if (downsample_mode) {
+            std::cout << "Mode: DOWNSAMPLING from N³ to (N/2)³ (binary output)"
+                      << std::endl;
             std::cout << "Output file: " << output_filename << std::endl;
         } else {
             std::cout << "Mode: READ ONLY" << std::endl;
@@ -108,6 +150,12 @@ int main(int argc, char* argv[]) {
             Upscaler upscaler(reader);
             if (!upscaler.UpscaleRestartFile(output_filename)) {
                 std::cerr << "Failed to upscale restart file" << std::endl;
+                return 1;
+            }
+        } else if (downsample_mode) {
+            Downsampler downsampler(reader);
+            if (!downsampler.DownsampleToBinary(output_filename)) {
+                std::cerr << "Failed to downsample restart file" << std::endl;
                 return 1;
             }
         } else {

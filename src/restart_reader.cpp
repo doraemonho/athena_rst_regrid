@@ -78,7 +78,9 @@ bool RestartReader::ReadRestartFile(const std::string& filename, int my_rank, in
 #endif
     
     // Debug output
-    std::cout << "Rank " << my_rank_ << ": data_size=" << data_size << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "data_size=" << data_size << std::endl;
+    }
     
     if (!SetupPhysicsReader()) {
         std::cerr << "ERROR: Failed to setup physics reader" << std::endl;
@@ -131,17 +133,13 @@ bool RestartReader::ReadParameterData() {
     
     // Broadcast header offset and parameter string to all ranks
     if (my_rank_ == 0) {
-        std::cout << "Rank 0: About to broadcast header offset: " << header << std::endl;
-    } else {
-        std::cout << "Rank " << my_rank_ << ": Waiting for header broadcast" << std::endl;
+        std::cout << "Broadcasting header offset: " << header << std::endl;
     }
 #if MPI_PARALLEL_ENABLED
     MPI_Bcast(&header, sizeof(IOWrapperSizeT), MPI_BYTE, 0, MPI_COMM_WORLD);
 #endif
     if (my_rank_ == 0) {
-        std::cout << "Rank 0: Header broadcast complete" << std::endl;
-    } else {
-        std::cout << "Rank " << my_rank_ << ": Received header: " << header << std::endl;
+        std::cout << "Header broadcast complete" << std::endl;
     }
     
     // Store header offset (position after <par_end>)

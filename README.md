@@ -1,73 +1,88 @@
-# AthenaK Restart Reader
+# AthenaK Restart Regridding Tool (Standalone)
 
-A utility for reading and analyzing AthenaK restart files with MPI support.
+`restart_reader` is a small C++17 CLI for working with AthenaK restart files (`.rst`).
+It supports:
 
-## Features
+- Read/inspect a restart file (prints mesh + sample physics values).
+- Upscale a restart by 2× in each active dimension and write a new `.rst`.
+- Downsample by 2× in each active dimension and write an Athena-style `.bin`.
 
-- ✅ Full compatibility with AthenaK restart file format
-- ✅ MPI parallel processing (matches AthenaK's MPI implementation)
-- ✅ Automatic load balancing across MPI ranks
-- ✅ Support for all physics modules (MHD, Hydro, Turbulence, etc.)
-- ✅ Detailed mesh and physics data display
+MPI is optional. When enabled, MeshBlocks are distributed across ranks using the same
+distribution logic as AthenaK.
 
-## Quick Start
+## Build
 
-### Build (Default: Release with MPI)
+### Script (recommended)
+
 ```bash
-./build.sh
+./build.sh            # Release + MPI (default)
+./build.sh --debug
+./build.sh --no-mpi
+./build.sh --clean
 ```
 
-### Build Options
+### Manual (CMake)
+
 ```bash
-./build.sh --debug      # Debug build
-./build.sh --no-mpi     # Serial build (no MPI)
-./build.sh --clean      # Clean build
-./build.sh --help       # Show all options
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=ON
+cmake --build build -j
 ```
 
-### Usage
+### Requirements
 
-**Serial:**
+- CMake 3.10+
+- C++17 compiler
+- MPI implementation (optional; enabled by default)
+
+## Usage
+
+### Read-only (inspect)
+
 ```bash
 ./build/restart_reader path/to/restart.rst
 ```
 
-**MPI Parallel:**
+### Upscale to restart (`.rst`)
+
 ```bash
-mpirun -np 4 ./build/restart_reader path/to/restart.rst
+./build/restart_reader input.rst --upscale output.rst
 ```
 
-## Build Requirements
+### Downsample to binary (`.bin`)
 
-- CMake 3.10+
-- C++17 compiler
-- MPI implementation (OpenMPI, MPICH, etc.) - optional
+```bash
+./build/restart_reader input.rst --downsample-bin output.bin
+```
 
-## Output
+### MPI examples
 
-The tool displays:
-- Restart file metadata (time, cycle, mesh info)
-- Physics module configuration  
-- MPI distribution information
-- Sample physics data from each rank
-- Data validation checks
+```bash
+mpirun -np 4 ./build/restart_reader input.rst
+mpirun -np 4 ./build/restart_reader input.rst --upscale output.rst
+mpirun -np 4 ./build/restart_reader input.rst --downsample-bin output.bin
+```
 
-## Files
+## Downsampling notes (what you get)
 
-| File | Description |
-|------|-------------|
-| `restart_reader.cpp/hpp` | Main restart reader implementation |
-| `io_wrapper.cpp/hpp` | MPI-aware file I/O wrapper |
-| `mpi_distribution.cpp/hpp` | Load balancing and MPI distribution |
-| `physics_reader.cpp/hpp` | Physics data reading and parsing |
-| `parameter_parser.cpp/hpp` | Parameter parsing utilities |
-| `main.cpp` | Command-line interface |
-| `debug_mpi.cpp` | MPI debugging utility |
+- Input requirements:
+  - MHD data must be present (`<mhd>` block); EOS must be `ideal` or `isothermal`.
+  - Global mesh and per-MeshBlock cell counts must be divisible by 2 in each active
+    dimension.
+  - Assumes a fully refined mesh where each parent has all `2^D` children and fine gids
+    are ordered by child index.
+- Output variables (always 8, written as `float`): `dens`, `vel1`, `vel2`, `vel3`,
+  `press`, `Bcc1`, `Bcc2`, `Bcc3`.
 
-## MPI Implementation
+Algorithm details: `src/DOWNSAMPLING.md`.
 
-The restart reader uses **identical MPI patterns** to AthenaK:
-- Collective `MPI_File_open()` operations
-- Rank 0 reads data, broadcasts to all ranks
-- Same data distribution and load balancing algorithms
-- Compatible with all AthenaK restart files
+## Source layout
+
+- Core reader: `src/restart_reader.*`, `src/physics_reader.*`, `src/io_wrapper.*`,
+  `src/mpi_distribution.*`, `src/parameter_parser.*`
+- Upscaling to `.rst`: `src/upscaler.*`, `src/prolongation.hpp`, `src/restart_writer.*`
+- Downsampling to `.bin`: `src/downsampler.*`, `src/binary_writer.*`
+
+## Relationship to the in-tree version
+
+This directory is the standalone snapshot of the in-tree tool under
+`../athenak_restart_multiphase/restart_reader/`.

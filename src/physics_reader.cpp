@@ -121,7 +121,9 @@ IOWrapperSizeT PhysicsReader::CalculateDataSize() const {
 
 bool PhysicsReader::ReadHydroData(IOWrapperSizeT& myoffset, IOWrapperSizeT& offset_myrank, 
                                  IOWrapperSizeT data_size, int noutmbs_min, int noutmbs_max) {
-    std::cout << "Reading Hydro data for MeshBlocks owned by this rank..." << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "Reading Hydro data..." << std::endl;
+    }
     size_t hydro_size = config_.nhydro * nout1_ * nout2_ * nout3_;
     
     // Following AthenaK's MPI pattern: read only MeshBlocks for this rank
@@ -285,18 +287,24 @@ bool PhysicsReader::ReadTurbulenceData(IOWrapperSizeT& myoffset, IOWrapperSizeT&
 }
 
 void PhysicsReader::SkipRadiationData(IOWrapperSizeT& offset_myrank) const {
-    std::cout << "Skipping Radiation data..." << std::endl;
+    if (my_rank_ == 0) {
+        std::cout << "Skipping Radiation data..." << std::endl;
+    }
     offset_myrank += nout1_ * nout2_ * nout3_ * config_.nrad * sizeof(Real);
 }
 
 void PhysicsReader::SkipZ4cADMData(IOWrapperSizeT& offset_myrank) const {
     if (config_.has_z4c) {
-        std::cout << "Skipping Z4c data..." << std::endl;
+        if (my_rank_ == 0) {
+            std::cout << "Skipping Z4c data..." << std::endl;
+        }
         offset_myrank += nout1_ * nout2_ * nout3_ * config_.nz4c * sizeof(Real);
     }
     
     if (config_.has_adm) {
-        std::cout << "Skipping ADM data..." << std::endl;
+        if (my_rank_ == 0) {
+            std::cout << "Skipping ADM data..." << std::endl;
+        }
         offset_myrank += nout1_ * nout2_ * nout3_ * config_.nadm * sizeof(Real);
     }
 }

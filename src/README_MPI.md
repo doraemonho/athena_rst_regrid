@@ -1,94 +1,53 @@
-# AthenaK Restart Reader - MPI Usage Guide
+# MPI usage notes
 
-## Overview
-The restart reader now properly supports MPI parallel execution, matching AthenaK's MPI implementation exactly.
+The main README for this project is `../README.md`. This file highlights MPI-specific
+details that are easy to forget.
 
-## Building with MPI
+## Build with MPI
 
-### Prerequisites
-- MPI installation (OpenMPI, MPICH, etc.)
-- CMake 3.10 or higher
+MPI is enabled by default.
 
-### Build Instructions
 ```bash
-cd restart_reader
-mkdir build
-cd build
-
-# Configure with MPI enabled
-cmake .. -DMPI_PARALLEL_ENABLED=ON
-
-# Build
-make
+cd ..
+./build.sh
 ```
 
-## Running the Restart Reader
+To disable MPI (serial build):
 
-### Serial Execution (1 rank)
 ```bash
-./restart_reader /path/to/restart_file.rst
+cd ..
+./build.sh --no-mpi
 ```
 
-### MPI Parallel Execution
+Manual CMake (equivalent to the script):
+
 ```bash
-# Run with 4 MPI ranks
-mpirun -np 4 ./restart_reader /path/to/restart_file.rst
-
-# Run with 16 MPI ranks
-mpirun -np 16 ./restart_reader /path/to/restart_file.rst
-
-# Run with custom MPI options
-mpirun -np 8 --oversubscribe ./restart_reader /path/to/restart_file.rst
+cd ..
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=ON
+cmake --build build -j
 ```
 
-## Important Notes
+## Run
 
-1. **Rank Detection**: The restart reader now automatically detects MPI rank and total ranks from the MPI runtime, just like AthenaK does.
-
-2. **Load Balancing**: The reader automatically distributes MeshBlocks across MPI ranks using AthenaK's load balancing algorithm.
-
-3. **File Access**: Only rank 0 opens the restart file, then broadcasts data to other ranks as needed.
-
-4. **Output**: Each rank will display information about its assigned MeshBlocks:
-   ```
-   Rank 0: MeshBlocks 0-24 (25 total)
-   Rank 1: MeshBlocks 25-49 (25 total)
-   ...
-   ```
-
-## Example Usage
-
-### Reading a 100 MeshBlock restart file with 4 ranks:
 ```bash
-mpirun -np 4 ./restart_reader ../turb_run/turb.00010.rst
+cd ..
+mpirun -np 4 ./build/restart_reader /path/to/restart.rst
+mpirun -np 4 ./build/restart_reader /path/to/restart.rst --upscale out.rst
+mpirun -np 4 ./build/restart_reader /path/to/restart.rst --downsample-bin out.bin
 ```
 
-Expected output:
-```
-=== AthenaK Restart Reader with MPI Support ===
-Running with 4 MPI rank(s)
+## Implementation details (high level)
 
-Reading AthenaK restart file: ../turb_run/turb.00010.rst
-Using automatic load balancing
-MPI Distribution:
-  Rank 0: MeshBlocks 0-24 (25 total)
-  Rank 1: MeshBlocks 25-49 (25 total)
-  Rank 2: MeshBlocks 50-74 (25 total)
-  Rank 3: MeshBlocks 75-99 (25 total)
-...
-```
+- File I/O uses MPI-IO (`MPI_File_open`, `MPI_File_read_at[_all]`,
+  `MPI_File_write_at[_all]`) via `src/io_wrapper.*`.
+- `RestartReader` reads some metadata on rank 0 (parameter string, header, MeshBlock
+  lists) and broadcasts it to all ranks; physics payloads are read using rank-local and
+  collective `*_at[_all]` calls to match AthenaK’s layout.
+- Upscaling/downsampling may redistribute data across ranks (each constructs its own
+  `MPIDistribution` for the output layout).
 
 ## Troubleshooting
 
-1. **MPI not found during build**: Ensure MPI is in your PATH or specify MPI compiler wrappers:
-   ```bash
-   cmake .. -DMPI_PARALLEL_ENABLED=ON -DCMAKE_CXX_COMPILER=mpicxx
-   ```
-
-2. **Segmentation fault**: Make sure the number of MPI ranks doesn't exceed the number of MeshBlocks in the restart file.
-
-3. **Wrong data distribution**: The reader uses AthenaK's exact load balancing algorithm. If you need custom distribution, you can modify the MPIDistribution class.
-
-4. **WSL2 MPI Issues**: On WSL2, MPI may not properly initialize across processes, causing each process to think it's rank 0 of 1. This is a known WSL2 limitation. The code is still correct and will work properly on actual HPC systems or native Linux environments.
-
-5. **MPI warnings**: The warning "Attempting to use an MPI routine before initializing" is a false positive from certain MPI implementations and can be safely ignored if the program runs correctly.
+- Don’t run with more ranks than MeshBlocks in the restart file.
+- Some WSL2 MPI setups can fail to spawn ranks correctly; if `mpirun` reports every
+  process as rank 0/1, try running on native Linux/HPC instead.

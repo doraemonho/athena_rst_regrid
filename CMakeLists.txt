@@ -38,6 +38,8 @@ set(SOURCES
     src/upscaler.cpp
     src/restart_writer.cpp
     src/simple_parameter_input.cpp
+    src/downsampler.cpp
+    src/binary_writer.cpp
 )
 
 # Header files
@@ -52,6 +54,8 @@ set(HEADERS
     src/upscaler.hpp
     src/restart_writer.hpp
     src/simple_parameter_input.hpp
+    src/downsampler.hpp
+    src/binary_writer.hpp
 )
 
 # Include directories
