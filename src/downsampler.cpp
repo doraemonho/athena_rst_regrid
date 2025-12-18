@@ -54,26 +54,68 @@ int FindRankForGid(const std::vector<int>& gids_eachrank,
 }
 }  // namespace
 
-Downsampler::Downsampler(RestartReader& reader) : reader_(reader) {
+Downsampler::Downsampler(RestartReader& reader, int downsample_factor)
+    : reader_(reader), downsample_factor_(downsample_factor) {
   const auto& mesh_indcs = reader_.GetMeshIndcs();
   multi_d_ = (mesh_indcs.nx2 > 1);
   three_d_ = (mesh_indcs.nx3 > 1);
-  nfine_per_coarse_ = 2;
+
+  if (downsample_factor_ == 2) {
+    downsample_levels_ = 1;
+  } else if (downsample_factor_ == 4) {
+    downsample_levels_ = 2;
+  } else {
+    downsample_levels_ = 0;
+    nfine_per_coarse_ = 0;
+    return;
+  }
+
+  nfine_per_coarse_ = downsample_factor_;
   if (multi_d_) {
-    nfine_per_coarse_ = 4;
+    nfine_per_coarse_ *= downsample_factor_;
   }
   if (three_d_) {
-    nfine_per_coarse_ = 8;
+    nfine_per_coarse_ *= downsample_factor_;
   }
 }
 
-LogicalLocation Downsampler::ParentLocation(const LogicalLocation& fine) {
-  LogicalLocation parent;
-  parent.level = fine.level - 1;
-  parent.lx1 = fine.lx1 / 2;
-  parent.lx2 = fine.lx2 / 2;
-  parent.lx3 = fine.lx3 / 2;
-  return parent;
+int Downsampler::ChildOffsetX1(int child_index) const {
+  const int dims = three_d_ ? 3 : (multi_d_ ? 2 : 1);
+  int ox = 0;
+  for (int bit = 0; bit < downsample_levels_; ++bit) {
+    const int pos = bit * dims;
+    ox |= ((child_index >> pos) & 1) << bit;
+  }
+  return ox;
+}
+
+int Downsampler::ChildOffsetX2(int child_index) const {
+  const int dims = three_d_ ? 3 : (multi_d_ ? 2 : 1);
+  int ox = 0;
+  for (int bit = 0; bit < downsample_levels_; ++bit) {
+    const int pos = bit * dims + 1;
+    ox |= ((child_index >> pos) & 1) << bit;
+  }
+  return ox;
+}
+
+int Downsampler::ChildOffsetX3(int child_index) const {
+  const int dims = three_d_ ? 3 : (multi_d_ ? 2 : 1);
+  int ox = 0;
+  for (int bit = 0; bit < downsample_levels_; ++bit) {
+    const int pos = bit * dims + 2;
+    ox |= ((child_index >> pos) & 1) << bit;
+  }
+  return ox;
+}
+
+LogicalLocation Downsampler::CoarseLocation(const LogicalLocation& fine) const {
+  LogicalLocation coarse;
+  coarse.level = fine.level - downsample_levels_;
+  coarse.lx1 = fine.lx1 / downsample_factor_;
+  coarse.lx2 = fine.lx2 / downsample_factor_;
+  coarse.lx3 = fine.lx3 / downsample_factor_;
+  return coarse;
 }
 
 bool Downsampler::SameLocation(const LogicalLocation& a, const LogicalLocation& b) {
@@ -126,14 +168,16 @@ void Downsampler::ComputeCoarseMeshConfig() {
   const RegionIndcs& fine_mb_indcs = reader_.GetMBIndcs();
 
   coarse_mesh_size_ = fine_mesh_size;
-  coarse_mesh_size_.dx1 = fine_mesh_size.dx1 * 2.0;
-  coarse_mesh_size_.dx2 = fine_mesh_size.dx2 * (multi_d_ ? 2.0 : 1.0);
-  coarse_mesh_size_.dx3 = fine_mesh_size.dx3 * (three_d_ ? 2.0 : 1.0);
+  coarse_mesh_size_.dx1 = fine_mesh_size.dx1 * static_cast<Real>(downsample_factor_);
+  coarse_mesh_size_.dx2 =
+      fine_mesh_size.dx2 * static_cast<Real>(multi_d_ ? downsample_factor_ : 1);
+  coarse_mesh_size_.dx3 =
+      fine_mesh_size.dx3 * static_cast<Real>(three_d_ ? downsample_factor_ : 1);
 
   coarse_mesh_indcs_ = fine_mesh_indcs;
-  coarse_mesh_indcs_.nx1 = fine_mesh_indcs.nx1 / 2;
-  coarse_mesh_indcs_.nx2 = multi_d_ ? (fine_mesh_indcs.nx2 / 2) : 1;
-  coarse_mesh_indcs_.nx3 = three_d_ ? (fine_mesh_indcs.nx3 / 2) : 1;
+  coarse_mesh_indcs_.nx1 = fine_mesh_indcs.nx1 / downsample_factor_;
+  coarse_mesh_indcs_.nx2 = multi_d_ ? (fine_mesh_indcs.nx2 / downsample_factor_) : 1;
+  coarse_mesh_indcs_.nx3 = three_d_ ? (fine_mesh_indcs.nx3 / downsample_factor_) : 1;
 
   coarse_mesh_indcs_.is = fine_mesh_indcs.ng;
   coarse_mesh_indcs_.ie = coarse_mesh_indcs_.is + coarse_mesh_indcs_.nx1 - 1;
@@ -145,7 +189,7 @@ void Downsampler::ComputeCoarseMeshConfig() {
   coarse_mb_indcs_ = fine_mb_indcs;
 
   coarse_nmb_total_ = reader_.GetNMBTotal() / nfine_per_coarse_;
-  coarse_root_level_ = reader_.GetRootLevel() - 1;
+  coarse_root_level_ = reader_.GetRootLevel() - downsample_levels_;
 }
 
 bool Downsampler::BuildCoarseLogicalLocations() {
@@ -164,10 +208,11 @@ bool Downsampler::BuildCoarseLogicalLocations() {
     return false;
   }
 
-  if (reader_.GetRootLevel() < 1) {
+  if (reader_.GetRootLevel() < downsample_levels_) {
     if (reader_.GetMyRank() == 0) {
       std::cerr << "ERROR: root_level=" << reader_.GetRootLevel()
-                << " too small for 2x downsampling" << std::endl;
+                << " too small for " << downsample_factor_ << "x downsampling"
+                << std::endl;
     }
     return false;
   }
@@ -176,7 +221,7 @@ bool Downsampler::BuildCoarseLogicalLocations() {
 
   for (int cg = 0; cg < coarse_nmb_total_; ++cg) {
     const int fg0 = cg * nfine_per_coarse_;
-    const LogicalLocation parent = ParentLocation(fine_llocs[fg0]);
+    const LogicalLocation parent = CoarseLocation(fine_llocs[fg0]);
     coarse_lloc_eachmb_[cg] = parent;
 
     for (int c = 0; c < nfine_per_coarse_; ++c) {
@@ -190,7 +235,7 @@ bool Downsampler::BuildCoarseLogicalLocations() {
         return false;
       }
 
-      const LogicalLocation computed_parent = ParentLocation(child);
+      const LogicalLocation computed_parent = CoarseLocation(child);
       if (!SameLocation(computed_parent, parent)) {
         if (reader_.GetMyRank() == 0) {
           std::cerr << "ERROR: Non-parent grouping at coarse gid " << cg
@@ -203,8 +248,9 @@ bool Downsampler::BuildCoarseLogicalLocations() {
       const int ox2 = multi_d_ ? ChildOffsetX2(c) : 0;
       const int ox3 = three_d_ ? ChildOffsetX3(c) : 0;
 
-      if (child.lx1 != 2 * parent.lx1 + ox1 || child.lx2 != 2 * parent.lx2 + ox2
-          || child.lx3 != 2 * parent.lx3 + ox3) {
+      if (child.lx1 != downsample_factor_ * parent.lx1 + ox1
+          || child.lx2 != downsample_factor_ * parent.lx2 + ox2
+          || child.lx3 != downsample_factor_ * parent.lx3 + ox3) {
         if (reader_.GetMyRank() == 0) {
           std::cerr << "ERROR: Fine gids not in expected child order at coarse gid " << cg
                     << std::endl;
@@ -235,13 +281,15 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
   const int nx2 = (mb_indcs.nx2 > 1) ? mb_indcs.nx2 : 1;
   const int nx3 = (mb_indcs.nx3 > 1) ? mb_indcs.nx3 : 1;
 
-  if ((nx1 % 2) != 0 || (multi_d_ && (nx2 % 2) != 0) || (three_d_ && (nx3 % 2) != 0)) {
+  if ((nx1 % downsample_factor_) != 0
+      || (multi_d_ && (nx2 % downsample_factor_) != 0)
+      || (three_d_ && (nx3 % downsample_factor_) != 0)) {
     return false;
   }
 
-  const int nx1_sub = nx1 / 2;
-  const int nx2_sub = multi_d_ ? (nx2 / 2) : 1;
-  const int nx3_sub = three_d_ ? (nx3 / 2) : 1;
+  const int nx1_sub = nx1 / downsample_factor_;
+  const int nx2_sub = multi_d_ ? (nx2 / downsample_factor_) : 1;
+  const int nx3_sub = three_d_ ? (nx3 / downsample_factor_) : 1;
 
   const int nout1 = nx1 + 2 * ng;
   const int nout2 = multi_d_ ? (nx2 + 2 * ng) : 1;
@@ -267,23 +315,26 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
   for (int k = 0; k < nx3_sub; ++k) {
     for (int j = 0; j < nx2_sub; ++j) {
       for (int i = 0; i <= nx1_sub; ++i) {
-        const int fi = ng + 2 * i;
-        const int fj = multi_d_ ? (ng + 2 * j) : 0;
-        const int fk = three_d_ ? (ng + 2 * k) : 0;
+        const int fi = ng + downsample_factor_ * i;
+        const int fj = multi_d_ ? (ng + downsample_factor_ * j) : 0;
+        const int fk = three_d_ ? (ng + downsample_factor_ * k) : 0;
 
         Real sum = 0.0;
         if (three_d_) {
-          for (int kk = 0; kk < 2; ++kk) {
-            for (int jj = 0; jj < 2; ++jj) {
+          for (int kk = 0; kk < downsample_factor_; ++kk) {
+            for (int jj = 0; jj < downsample_factor_; ++jj) {
               const std::uint64_t idx =
                   FaceIndexX1(fi, fj + jj, fk + kk, nout1p1, nout2);
               sum += b1f[idx];
             }
           }
-          sum *= 0.25;
+          sum *= 1.0
+                 / static_cast<Real>(downsample_factor_ * downsample_factor_);
         } else if (multi_d_) {
-          sum = 0.5 * (b1f[FaceIndexX1(fi, fj, 0, nout1p1, nout2)]
-                       + b1f[FaceIndexX1(fi, fj + 1, 0, nout1p1, nout2)]);
+          for (int jj = 0; jj < downsample_factor_; ++jj) {
+            sum += b1f[FaceIndexX1(fi, fj + jj, 0, nout1p1, nout2)];
+          }
+          sum *= 1.0 / static_cast<Real>(downsample_factor_);
         } else {
           sum = b1f[FaceIndexX1(fi, 0, 0, nout1p1, 1)];
         }
@@ -297,26 +348,31 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
   for (int k = 0; k < nx3_sub; ++k) {
     for (int j = 0; j <= nx2_sub; ++j) {
       for (int i = 0; i < nx1_sub; ++i) {
-        const int fi = ng + 2 * i;
-        const int fj = multi_d_ ? (ng + 2 * j) : 0;
-        const int fk = three_d_ ? (ng + 2 * k) : 0;
+        const int fi = ng + downsample_factor_ * i;
+        const int fj = multi_d_ ? (ng + downsample_factor_ * j) : 0;
+        const int fk = three_d_ ? (ng + downsample_factor_ * k) : 0;
 
         Real sum = 0.0;
         if (three_d_) {
-          for (int kk = 0; kk < 2; ++kk) {
-            for (int ii = 0; ii < 2; ++ii) {
+          for (int kk = 0; kk < downsample_factor_; ++kk) {
+            for (int ii = 0; ii < downsample_factor_; ++ii) {
               const std::uint64_t idx =
                   FaceIndexX2(fi + ii, fj, fk + kk, nout1, nout2p1);
               sum += b2f[idx];
             }
           }
-          sum *= 0.25;
+          sum *= 1.0
+                 / static_cast<Real>(downsample_factor_ * downsample_factor_);
         } else if (multi_d_) {
-          sum = 0.5 * (b2f[FaceIndexX2(fi, fj, 0, nout1, nout2p1)]
-                       + b2f[FaceIndexX2(fi + 1, fj, 0, nout1, nout2p1)]);
+          for (int ii = 0; ii < downsample_factor_; ++ii) {
+            sum += b2f[FaceIndexX2(fi + ii, fj, 0, nout1, nout2p1)];
+          }
+          sum *= 1.0 / static_cast<Real>(downsample_factor_);
         } else {
-          sum = 0.5 * (b2f[FaceIndexX2(fi, 0, 0, nout1, 2)]
-                       + b2f[FaceIndexX2(fi + 1, 0, 0, nout1, 2)]);
+          for (int ii = 0; ii < downsample_factor_; ++ii) {
+            sum += b2f[FaceIndexX2(fi + ii, 0, 0, nout1, 2)];
+          }
+          sum *= 1.0 / static_cast<Real>(downsample_factor_);
         }
 
         const std::uint64_t cidx = FaceIndexX2(i, j, k, nx1_sub, nx2_sub + 1);
@@ -328,28 +384,34 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
   for (int k = 0; k <= nx3_sub; ++k) {
     for (int j = 0; j < nx2_sub; ++j) {
       for (int i = 0; i < nx1_sub; ++i) {
-        const int fi = ng + 2 * i;
-        const int fj = multi_d_ ? (ng + 2 * j) : 0;
-        const int fk = three_d_ ? (ng + 2 * k) : 0;
+        const int fi = ng + downsample_factor_ * i;
+        const int fj = multi_d_ ? (ng + downsample_factor_ * j) : 0;
+        const int fk = three_d_ ? (ng + downsample_factor_ * k) : 0;
 
         Real sum = 0.0;
         if (three_d_) {
-          for (int jj = 0; jj < 2; ++jj) {
-            for (int ii = 0; ii < 2; ++ii) {
+          for (int jj = 0; jj < downsample_factor_; ++jj) {
+            for (int ii = 0; ii < downsample_factor_; ++ii) {
               const std::uint64_t idx =
                   FaceIndexX3(fi + ii, fj + jj, fk, nout1, nout2);
               sum += b3f[idx];
             }
           }
-          sum *= 0.25;
+          sum *= 1.0
+                 / static_cast<Real>(downsample_factor_ * downsample_factor_);
         } else if (multi_d_) {
-          sum = 0.25 * (b3f[FaceIndexX3(fi, fj, 0, nout1, nout2)]
-                        + b3f[FaceIndexX3(fi + 1, fj, 0, nout1, nout2)]
-                        + b3f[FaceIndexX3(fi, fj + 1, 0, nout1, nout2)]
-                        + b3f[FaceIndexX3(fi + 1, fj + 1, 0, nout1, nout2)]);
+          for (int jj = 0; jj < downsample_factor_; ++jj) {
+            for (int ii = 0; ii < downsample_factor_; ++ii) {
+              sum += b3f[FaceIndexX3(fi + ii, fj + jj, 0, nout1, nout2)];
+            }
+          }
+          sum *= 1.0
+                 / static_cast<Real>(downsample_factor_ * downsample_factor_);
         } else {
-          sum = 0.5 * (b3f[FaceIndexX3(fi, 0, 0, nout1, 1)]
-                       + b3f[FaceIndexX3(fi + 1, 0, 0, nout1, 1)]);
+          for (int ii = 0; ii < downsample_factor_; ++ii) {
+            sum += b3f[FaceIndexX3(fi + ii, 0, 0, nout1, nout2)];
+          }
+          sum *= 1.0 / static_cast<Real>(downsample_factor_);
         }
 
         const std::uint64_t cidx = FaceIndexX3(i, j, k, nx1_sub, nx2_sub);
@@ -374,72 +436,44 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
   for (int k = 0; k < nx3_sub; ++k) {
     for (int j = 0; j < nx2_sub; ++j) {
       for (int i = 0; i < nx1_sub; ++i) {
-        const int fi = ng + 2 * i;
-        const int fj = multi_d_ ? (ng + 2 * j) : 0;
-        const int fk = three_d_ ? (ng + 2 * k) : 0;
+        const int fi = ng + downsample_factor_ * i;
+        const int fj = multi_d_ ? (ng + downsample_factor_ * j) : 0;
+        const int fk = three_d_ ? (ng + downsample_factor_ * k) : 0;
 
-        const std::uint64_t idx0 = CellIndex(fi, fj, fk, nout1, nout2);
-        const std::uint64_t idx1 = CellIndex(fi + 1, fj, fk, nout1, nout2);
-
-        Real rho = 0.0;
-        Real m1 = 0.0;
-        Real m2 = 0.0;
-        Real m3 = 0.0;
-        Real eng = 0.0;
+        Real rho_sum = 0.0;
+        Real m1_sum = 0.0;
+        Real m2_sum = 0.0;
+        Real m3_sum = 0.0;
+        Real eng_sum = 0.0;
 
         auto read_var = [&](int v, std::uint64_t idx) -> Real {
           return mhd[static_cast<std::uint64_t>(v) * ncells + idx];
         };
 
-        if (three_d_) {
-          const std::uint64_t idx2 = CellIndex(fi, fj + 1, fk, nout1, nout2);
-          const std::uint64_t idx3 = CellIndex(fi + 1, fj + 1, fk, nout1, nout2);
-          const std::uint64_t idx4 = CellIndex(fi, fj, fk + 1, nout1, nout2);
-          const std::uint64_t idx5 = CellIndex(fi + 1, fj, fk + 1, nout1, nout2);
-          const std::uint64_t idx6 = CellIndex(fi, fj + 1, fk + 1, nout1, nout2);
-          const std::uint64_t idx7 = CellIndex(fi + 1, fj + 1, fk + 1, nout1, nout2);
-
-          rho = 0.125 * (read_var(0, idx0) + read_var(0, idx1) + read_var(0, idx2)
-                         + read_var(0, idx3) + read_var(0, idx4) + read_var(0, idx5)
-                         + read_var(0, idx6) + read_var(0, idx7));
-          m1 = 0.125 * (read_var(1, idx0) + read_var(1, idx1) + read_var(1, idx2)
-                        + read_var(1, idx3) + read_var(1, idx4) + read_var(1, idx5)
-                        + read_var(1, idx6) + read_var(1, idx7));
-          m2 = 0.125 * (read_var(2, idx0) + read_var(2, idx1) + read_var(2, idx2)
-                        + read_var(2, idx3) + read_var(2, idx4) + read_var(2, idx5)
-                        + read_var(2, idx6) + read_var(2, idx7));
-          m3 = 0.125 * (read_var(3, idx0) + read_var(3, idx1) + read_var(3, idx2)
-                        + read_var(3, idx3) + read_var(3, idx4) + read_var(3, idx5)
-                        + read_var(3, idx6) + read_var(3, idx7));
-          if (has_energy) {
-            eng = 0.125 * (read_var(4, idx0) + read_var(4, idx1) + read_var(4, idx2)
-                           + read_var(4, idx3) + read_var(4, idx4) + read_var(4, idx5)
-                           + read_var(4, idx6) + read_var(4, idx7));
-          }
-        } else if (multi_d_) {
-          const std::uint64_t idx2 = CellIndex(fi, fj + 1, 0, nout1, nout2);
-          const std::uint64_t idx3 = CellIndex(fi + 1, fj + 1, 0, nout1, nout2);
-          rho = 0.25 * (read_var(0, idx0) + read_var(0, idx1) + read_var(0, idx2)
-                        + read_var(0, idx3));
-          m1 = 0.25 * (read_var(1, idx0) + read_var(1, idx1) + read_var(1, idx2)
-                       + read_var(1, idx3));
-          m2 = 0.25 * (read_var(2, idx0) + read_var(2, idx1) + read_var(2, idx2)
-                       + read_var(2, idx3));
-          m3 = 0.25 * (read_var(3, idx0) + read_var(3, idx1) + read_var(3, idx2)
-                       + read_var(3, idx3));
-          if (has_energy) {
-            eng = 0.25 * (read_var(4, idx0) + read_var(4, idx1) + read_var(4, idx2)
-                          + read_var(4, idx3));
-          }
-        } else {
-          rho = 0.5 * (read_var(0, idx0) + read_var(0, idx1));
-          m1 = 0.5 * (read_var(1, idx0) + read_var(1, idx1));
-          m2 = 0.5 * (read_var(2, idx0) + read_var(2, idx1));
-          m3 = 0.5 * (read_var(3, idx0) + read_var(3, idx1));
-          if (has_energy) {
-            eng = 0.5 * (read_var(4, idx0) + read_var(4, idx1));
+        const int jj_max = multi_d_ ? downsample_factor_ : 1;
+        const int kk_max = three_d_ ? downsample_factor_ : 1;
+        for (int kk = 0; kk < kk_max; ++kk) {
+          for (int jj = 0; jj < jj_max; ++jj) {
+            for (int ii = 0; ii < downsample_factor_; ++ii) {
+              const std::uint64_t idx =
+                  CellIndex(fi + ii, fj + jj, fk + kk, nout1, nout2);
+              rho_sum += read_var(0, idx);
+              m1_sum += read_var(1, idx);
+              m2_sum += read_var(2, idx);
+              m3_sum += read_var(3, idx);
+              if (has_energy) {
+                eng_sum += read_var(4, idx);
+              }
+            }
           }
         }
+
+        const Real inv_vol = 1.0 / static_cast<Real>(nfine_per_coarse_);
+        const Real rho = inv_vol * rho_sum;
+        const Real m1 = inv_vol * m1_sum;
+        const Real m2 = inv_vol * m2_sum;
+        const Real m3 = inv_vol * m3_sum;
+        const Real eng = inv_vol * eng_sum;
 
         const std::uint64_t b1_left = FaceIndexX1(i, j, k, nx1_sub + 1, nx2_sub);
         const std::uint64_t b1_right = FaceIndexX1(i + 1, j, k, nx1_sub + 1, nx2_sub);
@@ -497,6 +531,14 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
 }
 
 bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
+  if (downsample_factor_ != 2 && downsample_factor_ != 4) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: Unsupported downsample factor " << downsample_factor_
+                << " (supported: 2 or 4)" << std::endl;
+    }
+    return false;
+  }
+
   if (!ParseEOS()) {
     return false;
   }
@@ -507,19 +549,23 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
   }
 
   const auto& mesh_indcs = reader_.GetMeshIndcs();
-  if ((mesh_indcs.nx1 % 2) != 0 || (multi_d_ && (mesh_indcs.nx2 % 2) != 0)
-      || (three_d_ && (mesh_indcs.nx3 % 2) != 0)) {
+  if ((mesh_indcs.nx1 % downsample_factor_) != 0
+      || (multi_d_ && (mesh_indcs.nx2 % downsample_factor_) != 0)
+      || (three_d_ && (mesh_indcs.nx3 % downsample_factor_) != 0)) {
     if (reader_.GetMyRank() == 0) {
-      std::cerr << "ERROR: Global mesh dimensions must be divisible by 2" << std::endl;
+      std::cerr << "ERROR: Global mesh dimensions must be divisible by "
+                << downsample_factor_ << std::endl;
     }
     return false;
   }
 
   const RegionIndcs& mb_indcs = reader_.GetMBIndcs();
-  if ((mb_indcs.nx1 % 2) != 0 || (multi_d_ && (mb_indcs.nx2 % 2) != 0)
-      || (three_d_ && (mb_indcs.nx3 % 2) != 0)) {
+  if ((mb_indcs.nx1 % downsample_factor_) != 0
+      || (multi_d_ && (mb_indcs.nx2 % downsample_factor_) != 0)
+      || (three_d_ && (mb_indcs.nx3 % downsample_factor_) != 0)) {
     if (reader_.GetMyRank() == 0) {
-      std::cerr << "ERROR: MeshBlock cell counts must be divisible by 2" << std::endl;
+      std::cerr << "ERROR: MeshBlock cell counts must be divisible by "
+                << downsample_factor_ << std::endl;
     }
     return false;
   }
@@ -548,9 +594,9 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
       reader_.GetMPIDistribution()->GetStartingMeshBlockID(my_rank);
   const int fine_nmb_thisrank = reader_.GetNMBThisRank();
 
-  const int nx1_sub = nx1 / 2;
-  const int nx2_sub = multi_d_ ? (nx2 / 2) : 1;
-  const int nx3_sub = three_d_ ? (nx3 / 2) : 1;
+  const int nx1_sub = nx1 / downsample_factor_;
+  const int nx2_sub = multi_d_ ? (nx2 / downsample_factor_) : 1;
+  const int nx3_sub = three_d_ ? (nx3 / downsample_factor_) : 1;
   const std::uint64_t sub_cells =
       static_cast<std::uint64_t>(nx1_sub) * nx2_sub * nx3_sub;
 

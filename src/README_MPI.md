@@ -34,6 +34,8 @@ cd ..
 mpirun -np 4 ./build/restart_reader /path/to/restart.rst
 mpirun -np 4 ./build/restart_reader /path/to/restart.rst --upscale out.rst
 mpirun -np 4 ./build/restart_reader /path/to/restart.rst --downsample-bin out.bin
+mpirun -np 4 ./build/restart_reader /path/to/restart.rst --downsample-bin out.bin \
+  --downsample-factor 4
 ```
 
 ## Implementation details (high level)

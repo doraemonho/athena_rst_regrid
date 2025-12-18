@@ -9,13 +9,16 @@
 
 class Downsampler {
  public:
-  explicit Downsampler(RestartReader& reader);
+  explicit Downsampler(RestartReader& reader, int downsample_factor = 2);
   ~Downsampler() = default;
 
   bool DownsampleToBinary(const std::string& output_filename);
 
  private:
   RestartReader& reader_;
+
+  int downsample_factor_ = 2;
+  int downsample_levels_ = 1;
 
   bool three_d_ = false;
   bool multi_d_ = false;
@@ -36,11 +39,11 @@ class Downsampler {
   bool BuildCoarseLogicalLocations();
   bool ParseEOS();
 
-  static int ChildOffsetX1(int child_index) { return child_index & 1; }
-  static int ChildOffsetX2(int child_index) { return (child_index >> 1) & 1; }
-  static int ChildOffsetX3(int child_index) { return (child_index >> 2) & 1; }
+  int ChildOffsetX1(int child_index) const;
+  int ChildOffsetX2(int child_index) const;
+  int ChildOffsetX3(int child_index) const;
 
-  static LogicalLocation ParentLocation(const LogicalLocation& fine);
+  LogicalLocation CoarseLocation(const LogicalLocation& fine) const;
   static bool SameLocation(const LogicalLocation& a, const LogicalLocation& b);
 
   static std::uint64_t CellIndex(int i, int j, int k, int nx1, int nx2);
@@ -52,4 +55,3 @@ class Downsampler {
 };
 
 #endif  // DOWNSAMPLER_HPP_
-

@@ -17,8 +17,10 @@ void PrintUsage(const char* prog_name, int my_rank) {
         std::cerr << "Options:" << std::endl;
         std::cerr << "  --upscale <output.rst>  : Upscale from N³ to (2N)³ resolution"
                   << std::endl;
-        std::cerr << "  --downsample-bin <output.bin> : Downsample to (N/2)³ and write"
+        std::cerr << "  --downsample-bin <output.bin> : Downsample to (N/f)³ and write"
                   << " AthenaK .bin" << std::endl;
+        std::cerr << "  --downsample-factor <2|4> : Set downsample factor f (default: 2)"
+                  << std::endl;
         std::cerr << "Examples:" << std::endl;
         std::cerr << "  Read mode:    " << prog_name
                   << " ../debeg_rst/OutputTest.00000.rst" << std::endl;
@@ -26,6 +28,9 @@ void PrintUsage(const char* prog_name, int my_rank) {
                   << std::endl;
         std::cerr << "  Downsample:   " << prog_name
                   << " input.rst --downsample-bin output.bin" << std::endl;
+        std::cerr << "  Downsample4x: " << prog_name
+                  << " input.rst --downsample-bin output.bin --downsample-factor 4"
+                  << std::endl;
 #if MPI_PARALLEL_ENABLED
         std::cerr << "  MPI read:     mpirun -np 4 " << prog_name << " input.rst"
                   << std::endl;
@@ -75,6 +80,8 @@ int main(int argc, char* argv[]) {
     bool upscale_mode = false;
     bool downsample_mode = false;
     std::string output_filename;
+    int downsample_factor = 2;
+    bool downsample_factor_set = false;
     
     // Check for upscale option
     for (int i = 2; i < argc; i++) {
@@ -108,7 +115,45 @@ int main(int argc, char* argv[]) {
             downsample_mode = true;
             output_filename = argv[i + 1];
             i++; // Skip the next argument
+        } else if (std::strcmp(argv[i], "--downsample-factor") == 0) {
+            if (i + 1 >= argc) {
+                if (my_rank == 0) {
+                    std::cerr << "Error: --downsample-factor requires an integer value"
+                              << std::endl;
+                }
+                PrintUsage(argv[0], my_rank);
+#if MPI_PARALLEL_ENABLED
+                MPI_Finalize();
+#endif
+                return 1;
+            }
+            downsample_factor = std::atoi(argv[i + 1]);
+            downsample_factor_set = true;
+            if (downsample_factor != 2 && downsample_factor != 4) {
+                if (my_rank == 0) {
+                    std::cerr << "Error: --downsample-factor must be 2 or 4"
+                              << std::endl;
+                }
+                PrintUsage(argv[0], my_rank);
+#if MPI_PARALLEL_ENABLED
+                MPI_Finalize();
+#endif
+                return 1;
+            }
+            i++; // Skip the next argument
         }
+    }
+
+    if (downsample_factor_set && !downsample_mode) {
+        if (my_rank == 0) {
+            std::cerr << "Error: --downsample-factor requires --downsample-bin"
+                      << std::endl;
+        }
+        PrintUsage(argv[0], my_rank);
+#if MPI_PARALLEL_ENABLED
+        MPI_Finalize();
+#endif
+        return 1;
     }
     
     if (my_rank == 0) {
@@ -126,8 +171,8 @@ int main(int argc, char* argv[]) {
             std::cout << "Mode: UPSCALING from N³ to (2N)³" << std::endl;
             std::cout << "Output file: " << output_filename << std::endl;
         } else if (downsample_mode) {
-            std::cout << "Mode: DOWNSAMPLING from N³ to (N/2)³ (binary output)"
-                      << std::endl;
+            std::cout << "Mode: DOWNSAMPLING from N³ to (N/" << downsample_factor
+                      << ")³ (binary output)" << std::endl;
             std::cout << "Output file: " << output_filename << std::endl;
         } else {
             std::cout << "Mode: READ ONLY" << std::endl;
@@ -153,7 +198,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         } else if (downsample_mode) {
-            Downsampler downsampler(reader);
+            Downsampler downsampler(reader, downsample_factor);
             if (!downsampler.DownsampleToBinary(output_filename)) {
                 std::cerr << "Failed to downsample restart file" << std::endl;
                 return 1;

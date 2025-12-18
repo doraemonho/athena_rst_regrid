@@ -1,8 +1,8 @@
-# Downsampling (2× coarsening) in `github_version_regridding/src`
+# Downsampling (2× / 4× coarsening) in `github_version_regridding/src`
 
 This document explains, step-by-step, how the standalone tool downsamples an
-AthenaK restart (`.rst`) by a factor of 2 in each active dimension and writes an
-Athena-style binary output (`.bin`).
+AthenaK restart (`.rst`) by a factor of **2** or **4** in each active dimension
+and writes an Athena-style binary output (`.bin`).
 
 The implementation lives in:
 
@@ -15,12 +15,13 @@ The implementation lives in:
 
 The CLI is in `github_version_regridding/src/main.cpp`.
 
-Downsampling is enabled by the `--downsample-bin` flag:
+Downsampling is enabled by the `--downsample-bin` flag, with an optional
+`--downsample-factor {2|4}` (default: `2`):
 
 ```cpp
 // main.cpp (simplified)
 } else if (downsample_mode) {
-  Downsampler downsampler(reader);
+  Downsampler downsampler(reader, downsample_factor);
   downsampler.DownsampleToBinary(output_filename);
 }
 ```
@@ -37,14 +38,16 @@ The downsampler is intentionally narrow/specific. It requires:
 1. **MHD must be present**: `config.has_mhd` must be `true`.
 2. **EOS must be** `ideal` **or** `isothermal`:
    - `ideal` requires that the energy variable exists (`config.nmhd >= 5`).
-3. **Global mesh and per-MeshBlock cell counts must be divisible by 2** (in every
-   active dimension).
+3. **Global mesh and per-MeshBlock cell counts must be divisible by the downsample
+   factor** (in every active dimension).
 4. **The restart must represent a globally refined mesh** with *complete sibling
    groups*:
-   - `nmb_total` must be divisible by `2^D` where `D` is 1D/2D/3D.
+   - `nmb_total` must be divisible by `f^D` where `f` is the downsample factor and `D`
+     is 1D/2D/3D.
    - fine MeshBlocks are assumed to be ordered in contiguous sibling groups in
      the expected child order (explained below).
-5. **`root_level >= 1`** since downsampling reduces `root_level` by one.
+5. **`root_level >= log2(f)`** since downsampling reduces `root_level` by that many
+   refinement levels (1 for `f=2`, 2 for `f=4`).
 
 If any of these are violated, `DownsampleToBinary()` returns `false`.
 
@@ -59,14 +62,21 @@ indices from the restart header:
 // downsampler.cpp (simplified)
 multi_d_ = (mesh_indcs.nx2 > 1);
 three_d_ = (mesh_indcs.nx3 > 1);
-nfine_per_coarse_ = three_d_ ? 8 : (multi_d_ ? 4 : 2);
+nfine_per_coarse_ = downsample_factor;
+if (multi_d_) nfine_per_coarse_ *= downsample_factor;
+if (three_d_) nfine_per_coarse_ *= downsample_factor;
 ```
 
 Interpretation:
 
-- 1D: 2 fine MeshBlocks combine into 1 coarse MeshBlock.
-- 2D: 4 fine MeshBlocks combine into 1 coarse MeshBlock.
-- 3D: 8 fine MeshBlocks combine into 1 coarse MeshBlock.
+- 1D: `f` fine MeshBlocks combine into 1 coarse MeshBlock.
+- 2D: `f^2` fine MeshBlocks combine into 1 coarse MeshBlock.
+- 3D: `f^3` fine MeshBlocks combine into 1 coarse MeshBlock.
+
+Examples:
+
+- `f=2`: 2 / 4 / 8
+- `f=4`: 4 / 16 / 64
 
 ### Step 2.2: Parse EOS settings from the restart parameter string
 
@@ -99,28 +109,28 @@ if (cs_opt.has_value()) {
 
 `ComputeCoarseMeshConfig()` constructs the *coarsened* mesh description:
 
-- `dx*` doubles in each active dimension.
-- global `nx*` halves in each active dimension.
-- `coarse_root_level = fine_root_level - 1`.
+- `dx*` is multiplied by `f` in each active dimension.
+- global `nx*` is divided by `f` in each active dimension.
+- `coarse_root_level = fine_root_level - log2(f)`.
 - `coarse_nmb_total = fine_nmb_total / nfine_per_coarse`.
 
 ```cpp
 // downsampler.cpp (simplified)
-coarse_mesh_size_.dx1 = fine.dx1 * 2.0;
-coarse_mesh_size_.dx2 = fine.dx2 * (multi_d_ ? 2.0 : 1.0);
-coarse_mesh_size_.dx3 = fine.dx3 * (three_d_ ? 2.0 : 1.0);
+coarse_mesh_size_.dx1 = fine.dx1 * f;
+coarse_mesh_size_.dx2 = fine.dx2 * (multi_d_ ? f : 1.0);
+coarse_mesh_size_.dx3 = fine.dx3 * (three_d_ ? f : 1.0);
 
-coarse_mesh_indcs_.nx1 = fine_indcs.nx1 / 2;
-coarse_mesh_indcs_.nx2 = multi_d_ ? fine_indcs.nx2 / 2 : 1;
-coarse_mesh_indcs_.nx3 = three_d_ ? fine_indcs.nx3 / 2 : 1;
+coarse_mesh_indcs_.nx1 = fine_indcs.nx1 / f;
+coarse_mesh_indcs_.nx2 = multi_d_ ? fine_indcs.nx2 / f : 1;
+coarse_mesh_indcs_.nx3 = three_d_ ? fine_indcs.nx3 / f : 1;
 
 coarse_nmb_total_ = reader_.GetNMBTotal() / nfine_per_coarse_;
-coarse_root_level_ = reader_.GetRootLevel() - 1;
+coarse_root_level_ = reader_.GetRootLevel() - log2(f);
 ```
 
 Important detail: **the per-MeshBlock cell counts are *not* changed**. Instead,
-each coarse MeshBlock is formed by merging `2^D` fine MeshBlocks and filling the
-coarse MeshBlock with `2^D` *sub-chunks* (each sub-chunk is half-resolution in
+each coarse MeshBlock is formed by merging `f^D` fine MeshBlocks and filling the
+coarse MeshBlock with `f^D` *sub-chunks* (each sub-chunk is `1/f`-resolution in
 each active dimension).
 
 ### Step 2.4: Build the coarse logical locations (and validate fine ordering)
@@ -131,42 +141,45 @@ locations. It enforces that:
 
 - every sibling group has a consistent parent,
 - all siblings are at the same refinement level,
-- the sibling order matches a bit-encoded child index.
+- the sibling order matches a Morton/Z-order child index for the `f^D` children.
 
-Child indexing convention (from `downsampler.hpp`):
+Child indexing convention:
 
 ```cpp
-static int ChildOffsetX1(int child_index) { return child_index & 1; }
-static int ChildOffsetX2(int child_index) { return (child_index >> 1) & 1; }
-static int ChildOffsetX3(int child_index) { return (child_index >> 2) & 1; }
+// f = 2^L, where L = log2(f)
+// D = number of active dimensions (1/2/3)
+//
+// child_index bit layout (LSB-first, interleaved by dimension):
+//   bit (b*D + d) == (ox[d] >> b) & 1
+//
+// Example (3D, f=4 => L=2, D=3):
+//   bit 0 = ox1 bit0, bit 1 = ox2 bit0, bit 2 = ox3 bit0
+//   bit 3 = ox1 bit1, bit 4 = ox2 bit1, bit 5 = ox3 bit1
+//
+// Offsets are recovered by de-interleaving the bits back into ox1/ox2/ox3.
 ```
 
-So in 3D, `child_index` in binary is:
-
-```
-bit 0 -> x1 offset (0 or 1)
-bit 1 -> x2 offset (0 or 1)
-bit 2 -> x3 offset (0 or 1)
-```
+So for `f=2`, this reduces to the original 3-bit child index encoding. For `f=4`,
+each offset is 0/1/2/3 and the order matches the restart file’s Morton ordering.
 
 Parent logical location is computed by integer-dividing the fine logical
-coordinates by 2 and decrementing the level:
+coordinates by `f` and decrementing the level by `log2(f)`:
 
 ```cpp
 // downsampler.cpp
-parent.level = fine.level - 1;
-parent.lx1   = fine.lx1 / 2;
-parent.lx2   = fine.lx2 / 2;
-parent.lx3   = fine.lx3 / 2;
+parent.level = fine.level - log2(f);
+parent.lx1   = fine.lx1 / f;
+parent.lx2   = fine.lx2 / f;
+parent.lx3   = fine.lx3 / f;
 ```
 
 The validation check that enforces ordering is effectively:
 
 ```cpp
 // downsampler.cpp (conceptual)
-child.lx1 == 2 * parent.lx1 + ChildOffsetX1(child_index)
-child.lx2 == 2 * parent.lx2 + ChildOffsetX2(child_index)
-child.lx3 == 2 * parent.lx3 + ChildOffsetX3(child_index)
+child.lx1 == f * parent.lx1 + ox1
+child.lx2 == f * parent.lx2 + ox2
+child.lx3 == f * parent.lx3 + ox3
 ```
 
 ### Step 2.5: Create a *new* MPI distribution for coarse MeshBlocks
@@ -205,8 +218,8 @@ for (int lf = 0; lf < fine_nmb_thisrank; ++lf) {
 
 `chunk` is **one child’s contribution** to its parent coarse MeshBlock:
 
-- It has **half** the cell count in each active dimension:
-  - `nx1_sub = nx1/2`, `nx2_sub = nx2/2` (if 2D/3D), `nx3_sub = nx3/2` (if 3D)
+- It has **1/f** the cell count in each active dimension:
+  - `nx1_sub = nx1/f`, `nx2_sub = nx2/f` (if 2D/3D), `nx3_sub = nx3/f` (if 3D)
 - It stores **8 output variables** in *var-major* order:
   - `dens, vel1, vel2, vel3, press, Bcc1, Bcc2, Bcc3`
 
@@ -283,7 +296,7 @@ downsampling for one fine MeshBlock.
 ### Step 3.1: Compute sub-grid sizes
 
 Given a fine MeshBlock of size `(nx1,nx2,nx3)`, the sub-chunk size is
-`(nx1/2, nx2/2, nx3/2)` in active dimensions.
+`(nx1/f, nx2/f, nx3/f)` in active dimensions.
 
 ### Step 3.2: Restrict face-centered magnetic fields (area averages)
 
@@ -293,17 +306,17 @@ The downsampler first constructs coarse face fields (`b1c/b2c/b3c`) on the
 sub-grid by *averaging the fine faces that cover the same coarse face area*.
 
 Example: restricting `B1f` to `b1c` (x1-faces). In 3D a coarse x1-face is covered
-by a 2×2 block of fine x1-faces in the (x2,x3) plane:
+by an `f×f` block of fine x1-faces in the (x2,x3) plane:
 
 ```cpp
 // downsampler.cpp (3D case)
 Real sum = 0.0;
-for (int kk = 0; kk < 2; ++kk) {
-  for (int jj = 0; jj < 2; ++jj) {
+for (int kk = 0; kk < f; ++kk) {
+  for (int jj = 0; jj < f; ++jj) {
     sum += b1f[FaceIndexX1(fi, fj + jj, fk + kk, nout1p1, nout2)];
   }
 }
-sum *= 0.25;   // average over 4 fine faces
+sum *= 1.0 / (f*f);   // average over f^2 fine faces
 b1c[FaceIndexX1(i, j, k, nx1_sub + 1, nx2_sub)] = sum;
 ```
 
@@ -318,13 +331,13 @@ mhd[var][cell]  where cell = CellIndex(i,j,k,nout1,nout2)
 ```
 
 For each coarse cell `(i,j,k)` in the sub-grid, the downsampler averages the
-corresponding 2^D fine cells:
+corresponding `f^D` fine cells:
 
-- 1D: average 2 cells
-- 2D: average 4 cells
-- 3D: average 8 cells
+- 1D: average `f` cells
+- 2D: average `f^2` cells
+- 3D: average `f^3` cells
 
-Example (3D):
+Example (3D, `f=2`):
 
 ```cpp
 rho = 0.125 * (rho000 + rho100 + rho010 + rho110 + rho001 + rho101 + rho011 + rho111);
@@ -333,6 +346,8 @@ m2  = 0.125 * (...);
 m3  = 0.125 * (...);
 eng = 0.125 * (...); // only if energy exists
 ```
+
+For `f=4`, the same idea applies but with `1/64` and a 4×4×4 set of fine cells.
 
 ### Step 3.4: Convert to primitive variables + compute pressure
 
@@ -366,14 +381,14 @@ Pressure calculation:
 
 Compared to the input restart:
 
-- **Resolution**: `nx*` is halved in each active dimension.
-- **Cell sizes**: `dx*` is doubled in each active dimension.
-- **MeshBlocks**: total MeshBlock count is divided by `2^D`, and each coarse
-  MeshBlock is formed by merging `2^D` fine MeshBlocks.
+- **Resolution**: `nx*` is divided by `f` in each active dimension.
+- **Cell sizes**: `dx*` is multiplied by `f` in each active dimension.
+- **MeshBlocks**: total MeshBlock count is divided by `f^D`, and each coarse
+  MeshBlock is formed by merging `f^D` fine MeshBlocks.
 - **Variables written**: exactly 8 float variables:
   - `dens, vel1, vel2, vel3, press, Bcc1, Bcc2, Bcc3`
 - **Parameter string**: `<mesh>` `nx1/nx2/nx3` is rewritten to match the coarse mesh.
-- **Root level**: decremented by 1.
+- **Root level**: decremented by `log2(f)`.
 
 ## 5) What changed in *this codebase* to support downsampling
 
@@ -384,7 +399,8 @@ Relative to the in-tree reader copy in
   - `github_version_regridding/src/downsampler.cpp` + `.hpp`
   - `github_version_regridding/src/binary_writer.cpp` + `.hpp`
 - CLI wiring in `github_version_regridding/src/main.cpp`:
-  - adds `--downsample-bin` and calls `Downsampler::DownsampleToBinary()`
+  - adds `--downsample-bin` / `--downsample-factor` and calls
+    `Downsampler::DownsampleToBinary()`
 - Extended parameter utilities in `github_version_regridding/src/parameter_parser.*`:
   - `ExtractStringInBlock(...)`, `ExtractRealInBlock(...)` (EOS parsing)
   - `ReplaceMeshNx(...)` (rewrite `<mesh>` sizes for the coarse output)
