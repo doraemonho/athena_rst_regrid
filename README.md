@@ -53,6 +53,9 @@ cmake --build build -j
 ```bash
 ./build/restart_reader input.rst --downsample-bin output.bin
 ./build/restart_reader input.rst --downsample-bin output.bin --downsample-factor 4
+./build/restart_reader input.rst --downsample-turb-bin turb.bin
+./build/restart_reader input.rst --downsample-bin mhd.bin --downsample-turb-bin turb.bin \
+  --downsample-factor 4
 ```
 
 ### MPI examples
@@ -61,7 +64,9 @@ cmake --build build -j
 mpirun -np 4 ./build/restart_reader input.rst
 mpirun -np 4 ./build/restart_reader input.rst --upscale output.rst
 mpirun -np 4 ./build/restart_reader input.rst --downsample-bin output.bin
-mpirun -np 4 ./build/restart_reader input.rst --downsample-bin output.bin --downsample-factor 4
+mpirun -np 4 ./build/restart_reader input.rst --downsample-bin output.bin \
+  --downsample-factor 4
+mpirun -np 4 ./build/restart_reader input.rst --downsample-turb-bin turb.bin
 ```
 
 ## Downsampling notes (what you get)
@@ -73,8 +78,11 @@ mpirun -np 4 ./build/restart_reader input.rst --downsample-bin output.bin --down
   - Assumes a fully refined mesh where each coarse MeshBlock combines `f^D` fine
     MeshBlocks (where `f` is the downsample factor and `D` is 1D/2D/3D), and fine gids
     are ordered by Morton/Z-order child index (see `src/DOWNSAMPLING.md`).
-- Output variables (always 8, written as `float`): `dens`, `vel1`, `vel2`, `vel3`,
-  `press`, `Bcc1`, `Bcc2`, `Bcc3`.
+- Output variables (AthenaK `mhd_w_bcc` ordering, written as `float`):
+  - `ideal` EOS: `dens`, `velx`, `vely`, `velz`, `eint`, `bcc1`, `bcc2`, `bcc3`.
+  - `isothermal` EOS: `dens`, `velx`, `vely`, `velz`, `bcc1`, `bcc2`, `bcc3`.
+- Turbulence output (separate `.bin`, AthenaK `turb_force` ordering, written as `float`):
+  - `force1`, `force2`, `force3`.
 
 Algorithm details: `src/DOWNSAMPLING.md`.
 

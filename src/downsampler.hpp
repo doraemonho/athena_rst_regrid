@@ -1,6 +1,7 @@
 #ifndef DOWNSAMPLER_HPP_
 #define DOWNSAMPLER_HPP_
 
+#include <cfloat>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@ class Downsampler {
   ~Downsampler() = default;
 
   bool DownsampleToBinary(const std::string& output_filename);
+  bool DownsampleTurbulenceToBinary(const std::string& output_filename);
 
  private:
   RestartReader& reader_;
@@ -30,14 +32,23 @@ class Downsampler {
   RegionIndcs coarse_mesh_indcs_;
   RegionIndcs coarse_mb_indcs_;
   std::vector<LogicalLocation> coarse_lloc_eachmb_;
+  bool coarse_ready_ = false;
 
   std::string eos_;
   Real gamma_ = 5.0 / 3.0;
   Real iso_sound_speed_ = 1.0;
 
+  // Mirror AthenaK EOS floor defaults (see athenak_restart_multiphase/src/eos/eos.cpp).
+  Real dfloor_ = static_cast<Real>(FLT_MIN);
+  Real pfloor_ = static_cast<Real>(FLT_MIN);
+  Real tfloor_ = static_cast<Real>(FLT_MIN);
+  Real sfloor_ = static_cast<Real>(FLT_MIN);
+  Real tmax_ = static_cast<Real>(FLT_MAX);
+
   void ComputeCoarseMeshConfig();
   bool BuildCoarseLogicalLocations();
   bool ParseEOS();
+  bool EnsureCoarseSetup();
 
   int ChildOffsetX1(int child_index) const;
   int ChildOffsetX2(int child_index) const;
@@ -52,6 +63,8 @@ class Downsampler {
   static std::uint64_t FaceIndexX3(int i, int j, int k, int nx1, int nx2);
 
   bool ComputeDownsampledChunk(int local_fine_mb, std::vector<float>* chunk) const;
+  bool ComputeDownsampledTurbulenceChunk(int local_fine_mb,
+                                        std::vector<float>* chunk) const;
 };
 
 #endif  // DOWNSAMPLER_HPP_

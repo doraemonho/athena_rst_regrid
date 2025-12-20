@@ -15,41 +15,58 @@ The implementation lives in:
 
 The CLI is in `github_version_regridding/src/main.cpp`.
 
-Downsampling is enabled by the `--downsample-bin` flag, with an optional
-`--downsample-factor {2|4}` (default: `2`):
+Downsampling is enabled by:
+
+- `--downsample-bin <mhd.bin>`: MHD `mhd_w_bcc` output
+- `--downsample-turb-bin <turb.bin>`: turbulence forcing `turb_force` output
+
+Both accept `--downsample-factor {2|4}` (default: `2`).
 
 ```cpp
 // main.cpp (simplified)
-} else if (downsample_mode) {
+} else if (downsample_mhd_mode || downsample_turb_mode) {
   Downsampler downsampler(reader, downsample_factor);
-  downsampler.DownsampleToBinary(output_filename);
+  if (downsample_mhd_mode) downsampler.DownsampleToBinary(output_mhd_filename);
+  if (downsample_turb_mode) {
+    downsampler.DownsampleTurbulenceToBinary(output_turb_filename);
+  }
 }
 ```
 
 So the call stack is roughly:
 
 1. `RestartReader::ReadRestartFile(...)` reads the `.rst` and fills in mesh/physics data.
-2. `Downsampler::DownsampleToBinary(output.bin)` performs coarsening + writes `.bin`.
+2. `Downsampler::DownsampleToBinary(mhd.bin)` performs MHD coarsening + writes `.bin`.
+3. `Downsampler::DownsampleTurbulenceToBinary(turb.bin)` performs turbulence coarsening
+   + writes `.bin`.
 
 ## 1) Preconditions (what the downsampler assumes)
 
-The downsampler is intentionally narrow/specific. It requires:
+The downsampler is intentionally narrow/specific.
 
-1. **MHD must be present**: `config.has_mhd` must be `true`.
-2. **EOS must be** `ideal` **or** `isothermal`:
-   - `ideal` requires that the energy variable exists (`config.nmhd >= 5`).
-3. **Global mesh and per-MeshBlock cell counts must be divisible by the downsample
+Common requirements (MHD + turbulence outputs):
+
+1. **Global mesh and per-MeshBlock cell counts must be divisible by the downsample
    factor** (in every active dimension).
-4. **The restart must represent a globally refined mesh** with *complete sibling
+2. **The restart must represent a globally refined mesh** with *complete sibling
    groups*:
    - `nmb_total` must be divisible by `f^D` where `f` is the downsample factor and `D`
      is 1D/2D/3D.
    - fine MeshBlocks are assumed to be ordered in contiguous sibling groups in
      the expected child order (explained below).
-5. **`root_level >= log2(f)`** since downsampling reduces `root_level` by that many
+3. **`root_level >= log2(f)`** since downsampling reduces `root_level` by that many
    refinement levels (1 for `f=2`, 2 for `f=4`).
 
-If any of these are violated, `DownsampleToBinary()` returns `false`.
+Output-specific requirements:
+
+- For MHD output (`DownsampleToBinary()`):
+  - MHD must be present (`config.has_mhd == true`).
+  - EOS must be `ideal` or `isothermal`.
+  - `ideal` requires energy (`config.nmhd >= 5`).
+- For turbulence output (`DownsampleTurbulenceToBinary()`):
+  - turbulence forcing must be present (`config.has_turbulence == true`).
+
+If any of these are violated, the corresponding downsample routine returns `false`.
 
 ## 2) Step-by-step logic inside `DownsampleToBinary()`
 
@@ -78,10 +95,18 @@ Examples:
 - `f=2`: 2 / 4 / 8
 - `f=4`: 4 / 16 / 64
 
-### Step 2.2: Parse EOS settings from the restart parameter string
+### Step 2.2: Parse EOS settings (and floors) from the restart parameter string
 
-`Downsampler::ParseEOS()` reads `eos`, `gamma`, and `iso_sound_speed` from the
-restart’s text parameter block (via `ParameterParser`):
+`Downsampler::ParseEOS()` reads `eos`, `gamma`, `iso_sound_speed`, and the
+AthenaK EOS floor parameters from the restart’s text parameter block (via
+`ParameterParser`):
+
+- `dfloor`, `pfloor`, `tfloor`, `sfloor`, `tmax`
+
+Defaults match AthenaK’s `EquationOfState` constructor:
+
+- floors default to `FLT_MIN`
+- `tmax` defaults to `FLT_MAX`
 
 ```cpp
 // downsampler.cpp
@@ -220,13 +245,19 @@ for (int lf = 0; lf < fine_nmb_thisrank; ++lf) {
 
 - It has **1/f** the cell count in each active dimension:
   - `nx1_sub = nx1/f`, `nx2_sub = nx2/f` (if 2D/3D), `nx3_sub = nx3/f` (if 3D)
-- It stores **8 output variables** in *var-major* order:
-  - `dens, vel1, vel2, vel3, press, Bcc1, Bcc2, Bcc3`
+- It stores output variables in *var-major* order, matching AthenaK’s
+  `mhd_w_bcc` binary output:
+  - `ideal` EOS (8 vars): `dens, velx, vely, velz, eint, bcc1, bcc2, bcc3`
+  - `isothermal` EOS (7 vars): `dens, velx, vely, velz, bcc1, bcc2, bcc3`
+
+For turbulence output (`DownsampleTurbulenceToBinary()`), the chunk uses the same
+layout but stores `nforce` variables (typically 3) matching AthenaK `turb_force`:
+`force1, force2, force3`.
 
 Layout:
 
 ```text
-chunk = [var0 subgrid][var1 subgrid]...[var7 subgrid]
+chunk = [var0 subgrid][var1 subgrid]...[var(N-1) subgrid]
 each subgrid is flattened (i,j,k) via CellIndex(i,j,k,nx1_sub,nx2_sub)
 ```
 
@@ -259,7 +290,7 @@ as:
 1. a per-message `int32_t n_chunks`
 2. repeated records of:
    - `ChunkHeader{ coarse_gid, child_index }`
-   - `float data[kOutVars * sub_cells]`
+   - `float data[out_vars * sub_cells]`
 
 Then it sends the message via `MPI_Isend`.
 
@@ -286,7 +317,7 @@ Finally, `BinaryWriter::WriteBinaryFile(...)` writes:
 - one fixed-size binary record per coarse MeshBlock containing:
   - indices + logical location,
   - physical bounds,
-  - raw `float` array for the 8 variables on that MeshBlock.
+  - raw `float` array for the `out_vars` variables on that MeshBlock.
 
 ## 3) Step-by-step logic inside `ComputeDownsampledChunk()`
 
@@ -349,14 +380,14 @@ eng = 0.125 * (...); // only if energy exists
 
 For `f=4`, the same idea applies but with `1/64` and a 4×4×4 set of fine cells.
 
-### Step 3.4: Convert to primitive variables + compute pressure
+### Step 3.4: Convert to primitive variables + compute internal energy
 
 The output is **not** written as conserved variables; the chunk stores:
 
 - density `rho`
-- velocity components `v = m/rho`
-- pressure `press`
-- cell-centered magnetic field `Bcc*`
+- velocity components `v = m/rho` (written as `velx/vely/velz`)
+- internal energy density `eint` (**ideal EOS only**)
+- cell-centered magnetic field `bcc1/bcc2/bcc3`
 
 Cell-centered magnetic fields are computed by averaging the two neighboring
 coarse faces around the cell center:
@@ -367,15 +398,24 @@ by = 0.5 * (b2c[b2_bot]  + b2c[b2_top]);
 bz = 0.5 * (b3c[b3_bot]  + b3c[b3_top]);
 ```
 
-Pressure calculation:
+Internal energy calculation (ideal EOS only):
 
 - **Ideal EOS**:
+  - apply density floor: `rho = max(rho, dfloor)` (momentum/energy unchanged)
   - kinetic energy `ke = 0.5*(m·m)/rho`
   - magnetic energy `me = 0.5*(B·B)`
   - internal energy `eint = eng - ke - me`
-  - `press = (gamma - 1) * eint`
-- **Isothermal EOS**:
-  - `press = cs^2 * rho`
+  - apply EOS floors (matching AthenaK `SingleC2P_IdealMHD`):
+    - energy floor via `pfloor`
+    - temperature floor via `tfloor`
+    - temperature ceiling via `tmax`
+    - entropy floor via `sfloor`
+  - write the floored `eint` to the output
+
+Pressure is **not** written; if needed, compute it from the output as:
+
+- `ideal` EOS: `press = (gamma - 1) * eint`
+- `isothermal` EOS: `press = cs^2 * rho`
 
 ## 4) What changes in the output (data + metadata)
 
@@ -385,8 +425,11 @@ Compared to the input restart:
 - **Cell sizes**: `dx*` is multiplied by `f` in each active dimension.
 - **MeshBlocks**: total MeshBlock count is divided by `f^D`, and each coarse
   MeshBlock is formed by merging `f^D` fine MeshBlocks.
-- **Variables written**: exactly 8 float variables:
-  - `dens, vel1, vel2, vel3, press, Bcc1, Bcc2, Bcc3`
+- **Variables written** (AthenaK `mhd_w_bcc` ordering):
+  - `ideal` EOS (8 vars): `dens, velx, vely, velz, eint, bcc1, bcc2, bcc3`
+  - `isothermal` EOS (7 vars): `dens, velx, vely, velz, bcc1, bcc2, bcc3`
+- **Turbulence variables written** (separate `.bin`, AthenaK `turb_force` ordering):
+  - `force1, force2, force3`
 - **Parameter string**: `<mesh>` `nx1/nx2/nx3` is rewritten to match the coarse mesh.
 - **Root level**: decremented by `log2(f)`.
 
@@ -399,8 +442,9 @@ Relative to the in-tree reader copy in
   - `github_version_regridding/src/downsampler.cpp` + `.hpp`
   - `github_version_regridding/src/binary_writer.cpp` + `.hpp`
 - CLI wiring in `github_version_regridding/src/main.cpp`:
-  - adds `--downsample-bin` / `--downsample-factor` and calls
-    `Downsampler::DownsampleToBinary()`
+  - adds `--downsample-bin` / `--downsample-turb-bin` / `--downsample-factor`
+  - calls `Downsampler::DownsampleToBinary()` and/or
+    `Downsampler::DownsampleTurbulenceToBinary()`
 - Extended parameter utilities in `github_version_regridding/src/parameter_parser.*`:
   - `ExtractStringInBlock(...)`, `ExtractRealInBlock(...)` (EOS parsing)
   - `ReplaceMeshNx(...)` (rewrite `<mesh>` sizes for the coarse output)

@@ -19,6 +19,8 @@ void PrintUsage(const char* prog_name, int my_rank) {
                   << std::endl;
         std::cerr << "  --downsample-bin <output.bin> : Downsample to (N/f)³ and write"
                   << " AthenaK .bin" << std::endl;
+        std::cerr << "  --downsample-turb-bin <output.bin> : Downsample turbulence "
+                  << "force and write AthenaK .bin" << std::endl;
         std::cerr << "  --downsample-factor <2|4> : Set downsample factor f (default: 2)"
                   << std::endl;
         std::cerr << "Examples:" << std::endl;
@@ -30,6 +32,9 @@ void PrintUsage(const char* prog_name, int my_rank) {
                   << " input.rst --downsample-bin output.bin" << std::endl;
         std::cerr << "  Downsample4x: " << prog_name
                   << " input.rst --downsample-bin output.bin --downsample-factor 4"
+                  << std::endl;
+        std::cerr << "  Down+Turb:    " << prog_name
+                  << " input.rst --downsample-bin mhd.bin --downsample-turb-bin turb.bin"
                   << std::endl;
 #if MPI_PARALLEL_ENABLED
         std::cerr << "  MPI read:     mpirun -np 4 " << prog_name << " input.rst"
@@ -78,8 +83,11 @@ int main(int argc, char* argv[]) {
     
     std::string filename = argv[1];
     bool upscale_mode = false;
-    bool downsample_mode = false;
-    std::string output_filename;
+    std::string upscale_output_filename;
+    bool downsample_mhd_mode = false;
+    bool downsample_turb_mode = false;
+    std::string output_mhd_filename;
+    std::string output_turb_filename;
     int downsample_factor = 2;
     bool downsample_factor_set = false;
     
@@ -98,7 +106,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             upscale_mode = true;
-            output_filename = argv[i + 1];
+            upscale_output_filename = argv[i + 1];
             i++; // Skip the next argument
         } else if (std::strcmp(argv[i], "--downsample-bin") == 0) {
             if (i + 1 >= argc) {
@@ -112,8 +120,23 @@ int main(int argc, char* argv[]) {
 #endif
                 return 1;
             }
-            downsample_mode = true;
-            output_filename = argv[i + 1];
+            downsample_mhd_mode = true;
+            output_mhd_filename = argv[i + 1];
+            i++; // Skip the next argument
+        } else if (std::strcmp(argv[i], "--downsample-turb-bin") == 0) {
+            if (i + 1 >= argc) {
+                if (my_rank == 0) {
+                    std::cerr << "Error: --downsample-turb-bin requires an output "
+                              << "filename" << std::endl;
+                }
+                PrintUsage(argv[0], my_rank);
+#if MPI_PARALLEL_ENABLED
+                MPI_Finalize();
+#endif
+                return 1;
+            }
+            downsample_turb_mode = true;
+            output_turb_filename = argv[i + 1];
             i++; // Skip the next argument
         } else if (std::strcmp(argv[i], "--downsample-factor") == 0) {
             if (i + 1 >= argc) {
@@ -144,9 +167,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (downsample_factor_set && !downsample_mode) {
+    if (downsample_factor_set && !downsample_mhd_mode && !downsample_turb_mode) {
         if (my_rank == 0) {
-            std::cerr << "Error: --downsample-factor requires --downsample-bin"
+            std::cerr << "Error: --downsample-factor requires a downsample output option"
                       << std::endl;
         }
         PrintUsage(argv[0], my_rank);
@@ -159,8 +182,8 @@ int main(int argc, char* argv[]) {
     if (my_rank == 0) {
         std::cout << "=== AthenaK Restart Reader with MPI Support ===" << std::endl;
         std::cout << "Running with " << nranks << " MPI rank(s)" << std::endl;
-        if (upscale_mode && downsample_mode) {
-            std::cerr << "Error: cannot use --upscale and --downsample-bin together"
+        if (upscale_mode && (downsample_mhd_mode || downsample_turb_mode)) {
+            std::cerr << "Error: cannot use --upscale with downsampling options"
                       << std::endl;
 #if MPI_PARALLEL_ENABLED
             MPI_Finalize();
@@ -169,11 +192,17 @@ int main(int argc, char* argv[]) {
         }
         if (upscale_mode) {
             std::cout << "Mode: UPSCALING from N³ to (2N)³" << std::endl;
-            std::cout << "Output file: " << output_filename << std::endl;
-        } else if (downsample_mode) {
+            std::cout << "Output file: " << upscale_output_filename << std::endl;
+        } else if (downsample_mhd_mode || downsample_turb_mode) {
             std::cout << "Mode: DOWNSAMPLING from N³ to (N/" << downsample_factor
                       << ")³ (binary output)" << std::endl;
-            std::cout << "Output file: " << output_filename << std::endl;
+            if (downsample_mhd_mode) {
+                std::cout << "MHD output file: " << output_mhd_filename << std::endl;
+            }
+            if (downsample_turb_mode) {
+                std::cout << "Turbulence output file: " << output_turb_filename
+                          << std::endl;
+            }
         } else {
             std::cout << "Mode: READ ONLY" << std::endl;
         }
@@ -193,15 +222,24 @@ int main(int argc, char* argv[]) {
         if (upscale_mode) {
             // Perform upscaling
             Upscaler upscaler(reader);
-            if (!upscaler.UpscaleRestartFile(output_filename)) {
+            if (!upscaler.UpscaleRestartFile(upscale_output_filename)) {
                 std::cerr << "Failed to upscale restart file" << std::endl;
                 return 1;
             }
-        } else if (downsample_mode) {
+        } else if (downsample_mhd_mode || downsample_turb_mode) {
             Downsampler downsampler(reader, downsample_factor);
-            if (!downsampler.DownsampleToBinary(output_filename)) {
-                std::cerr << "Failed to downsample restart file" << std::endl;
-                return 1;
+            if (downsample_mhd_mode) {
+                if (!downsampler.DownsampleToBinary(output_mhd_filename)) {
+                    std::cerr << "Failed to downsample restart file (MHD)" << std::endl;
+                    return 1;
+                }
+            }
+            if (downsample_turb_mode) {
+                if (!downsampler.DownsampleTurbulenceToBinary(output_turb_filename)) {
+                    std::cerr << "Failed to downsample restart file (turbulence)"
+                              << std::endl;
+                    return 1;
+                }
             }
         } else {
             // Normal read mode

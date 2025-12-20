@@ -1,6 +1,7 @@
 #include "downsampler.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -21,15 +22,10 @@ struct ChunkHeader {
 };
 
 constexpr int kVarDens = 0;
-constexpr int kVarVel1 = 1;
-constexpr int kVarVel2 = 2;
-constexpr int kVarVel3 = 3;
-constexpr int kVarPress = 4;
-constexpr int kVarBcc1 = 5;
-constexpr int kVarBcc2 = 6;
-constexpr int kVarBcc3 = 7;
-
-constexpr int kOutVars = 8;
+constexpr int kVarVelx = 1;
+constexpr int kVarVely = 2;
+constexpr int kVarVelz = 3;
+constexpr int kVarEint = 4;  // present only for ideal EOS (AthenaK mhd_w/mhd_w_bcc)
 
 int FindRankForGid(const std::vector<int>& gids_eachrank,
                    const std::vector<int>& nmb_eachrank, int gid) {
@@ -140,6 +136,11 @@ std::uint64_t Downsampler::FaceIndexX3(int i, int j, int k, int nx1, int nx2) {
 
 bool Downsampler::ParseEOS() {
   eos_ = "ideal";
+  dfloor_ = static_cast<Real>(FLT_MIN);
+  pfloor_ = static_cast<Real>(FLT_MIN);
+  tfloor_ = static_cast<Real>(FLT_MIN);
+  sfloor_ = static_cast<Real>(FLT_MIN);
+  tmax_ = static_cast<Real>(FLT_MAX);
 
   const std::string& params = reader_.GetParameterString();
   auto eos_opt = ParameterParser::ExtractStringInBlock(params, "mhd", "eos");
@@ -159,6 +160,58 @@ bool Downsampler::ParseEOS() {
   if (cs_opt.has_value()) {
     iso_sound_speed_ = *cs_opt;
   }
+
+  auto dfloor_opt = ParameterParser::ExtractRealInBlock(params, "mhd", "dfloor");
+  if (!dfloor_opt.has_value()) {
+    dfloor_opt = ParameterParser::ExtractRealInBlock(params, "hydro", "dfloor");
+  }
+  if (dfloor_opt.has_value()) {
+    dfloor_ = *dfloor_opt;
+  }
+
+  auto pfloor_opt = ParameterParser::ExtractRealInBlock(params, "mhd", "pfloor");
+  if (!pfloor_opt.has_value()) {
+    pfloor_opt = ParameterParser::ExtractRealInBlock(params, "hydro", "pfloor");
+  }
+  if (pfloor_opt.has_value()) {
+    pfloor_ = *pfloor_opt;
+  }
+
+  auto tfloor_opt = ParameterParser::ExtractRealInBlock(params, "mhd", "tfloor");
+  if (!tfloor_opt.has_value()) {
+    tfloor_opt = ParameterParser::ExtractRealInBlock(params, "hydro", "tfloor");
+  }
+  if (tfloor_opt.has_value()) {
+    tfloor_ = *tfloor_opt;
+  }
+
+  auto sfloor_opt = ParameterParser::ExtractRealInBlock(params, "mhd", "sfloor");
+  if (!sfloor_opt.has_value()) {
+    sfloor_opt = ParameterParser::ExtractRealInBlock(params, "hydro", "sfloor");
+  }
+  if (sfloor_opt.has_value()) {
+    sfloor_ = *sfloor_opt;
+  }
+
+  auto tmax_opt = ParameterParser::ExtractRealInBlock(params, "mhd", "tmax");
+  if (!tmax_opt.has_value()) {
+    tmax_opt = ParameterParser::ExtractRealInBlock(params, "hydro", "tmax");
+  }
+  if (tmax_opt.has_value()) {
+    tmax_ = *tmax_opt;
+  }
+  return true;
+}
+
+bool Downsampler::EnsureCoarseSetup() {
+  if (coarse_ready_) {
+    return true;
+  }
+  ComputeCoarseMeshConfig();
+  if (!BuildCoarseLogicalLocations()) {
+    return false;
+  }
+  coarse_ready_ = true;
   return true;
 }
 
@@ -275,6 +328,23 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
     return false;
   }
 
+  const bool has_energy = (config.nmhd >= 5);
+  const bool ideal_eos = (eos_ == "ideal");
+  const bool isothermal_eos = (eos_ == "isothermal");
+
+  if (ideal_eos && !has_energy) {
+    return false;
+  }
+  if (!ideal_eos && !isothermal_eos) {
+    return false;
+  }
+
+  // Match AthenaK `mhd_w_bcc` bin output ordering:
+  // - ideal EOS: dens, velx, vely, velz, eint, bcc1, bcc2, bcc3  (8 vars)
+  // - isothermal EOS: dens, velx, vely, velz, bcc1, bcc2, bcc3   (7 vars)
+  const int bcc_index_base = ideal_eos ? 5 : 4;
+  const int out_vars = ideal_eos ? 8 : 7;
+
   const auto& mb_indcs = reader_.GetMBIndcs();
   const int ng = mb_indcs.ng;
   const int nx1 = mb_indcs.nx1;
@@ -302,7 +372,7 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
 
   const std::uint64_t sub_cells =
       static_cast<std::uint64_t>(nx1_sub) * nx2_sub * nx3_sub;
-  chunk->assign(static_cast<std::size_t>(kOutVars) * sub_cells, 0.0F);
+  chunk->assign(static_cast<std::size_t>(out_vars) * sub_cells, 0.0F);
 
   std::vector<Real> b1c(static_cast<std::size_t>(nx3_sub) * nx2_sub * (nx1_sub + 1), 0.0);
   std::vector<Real> b2c(static_cast<std::size_t>(nx3_sub) * (nx2_sub + 1) * nx1_sub, 0.0);
@@ -422,17 +492,6 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
 
   const int ncells = nout1 * nout2 * nout3;
 
-  const bool has_energy = (config.nmhd >= 5);
-  const bool ideal_eos = (eos_ == "ideal");
-  const bool isothermal_eos = (eos_ == "isothermal");
-
-  if (ideal_eos && !has_energy) {
-    return false;
-  }
-  if (!ideal_eos && !isothermal_eos) {
-    return false;
-  }
-
   for (int k = 0; k < nx3_sub; ++k) {
     for (int j = 0; j < nx2_sub; ++j) {
       for (int i = 0; i < nx1_sub; ++i) {
@@ -486,43 +545,154 @@ bool Downsampler::ComputeDownsampledChunk(int local_fine_mb,
         const Real by = 0.5 * (b2c[b2_bot] + b2c[b2_top]);
         const Real bz = 0.5 * (b3c[b3_bot] + b3c[b3_top]);
 
+        Real rho_out = rho;
+        if (rho_out < dfloor_) {
+          rho_out = dfloor_;
+        }
+
         Real v1 = 0.0;
         Real v2 = 0.0;
         Real v3 = 0.0;
-        if (rho != 0.0) {
-          v1 = m1 / rho;
-          v2 = m2 / rho;
-          v3 = m3 / rho;
+        if (rho_out != 0.0) {
+          v1 = m1 / rho_out;
+          v2 = m2 / rho_out;
+          v3 = m3 / rho_out;
         }
 
-        Real press = 0.0;
+        Real eint_out = 0.0;
         if (ideal_eos) {
-          const Real ke = 0.5 * (m1 * m1 + m2 * m2 + m3 * m3) / std::max(rho, 1e-30);
+          const Real gm1 = gamma_ - 1.0;
+          if (gm1 <= 0.0) {
+            return false;
+          }
+          const Real di = 1.0 / rho_out;
+          const Real ke = 0.5 * di * (m1 * m1 + m2 * m2 + m3 * m3);
           const Real me = 0.5 * (bx * bx + by * by + bz * bz);
-          const Real eint = eng - ke - me;
-          press = (gamma_ - 1.0) * eint;
-        } else {
-          const Real cs2 = iso_sound_speed_ * iso_sound_speed_;
-          press = cs2 * rho;
+
+          Real eint = eng - ke - me;
+          const Real efloor = pfloor_ / gm1;
+          if (eint < efloor) {
+            eint = efloor;
+          }
+          if (gm1 * eint * di < tfloor_) {
+            eint = rho_out * tfloor_ / gm1;
+          }
+          if (gm1 * eint * di > tmax_) {
+            eint = rho_out * tmax_ / gm1;
+          }
+
+          const Real spe_over_eps = gm1 / std::pow(rho_out, gm1);
+          const Real spe = spe_over_eps * eint * di;
+          if (spe <= sfloor_) {
+            eint = rho_out * sfloor_ / spe_over_eps;
+          }
+          eint_out = eint;
         }
 
         const std::uint64_t cidx = CellIndex(i, j, k, nx1_sub, nx2_sub);
         (*chunk)[static_cast<std::size_t>(kVarDens) * sub_cells + cidx] =
-            static_cast<float>(rho);
-        (*chunk)[static_cast<std::size_t>(kVarVel1) * sub_cells + cidx] =
+            static_cast<float>(rho_out);
+        (*chunk)[static_cast<std::size_t>(kVarVelx) * sub_cells + cidx] =
             static_cast<float>(v1);
-        (*chunk)[static_cast<std::size_t>(kVarVel2) * sub_cells + cidx] =
+        (*chunk)[static_cast<std::size_t>(kVarVely) * sub_cells + cidx] =
             static_cast<float>(v2);
-        (*chunk)[static_cast<std::size_t>(kVarVel3) * sub_cells + cidx] =
+        (*chunk)[static_cast<std::size_t>(kVarVelz) * sub_cells + cidx] =
             static_cast<float>(v3);
-        (*chunk)[static_cast<std::size_t>(kVarPress) * sub_cells + cidx] =
-            static_cast<float>(press);
-        (*chunk)[static_cast<std::size_t>(kVarBcc1) * sub_cells + cidx] =
+        if (ideal_eos) {
+          (*chunk)[static_cast<std::size_t>(kVarEint) * sub_cells + cidx] =
+              static_cast<float>(eint_out);
+        }
+        (*chunk)[static_cast<std::size_t>(bcc_index_base + 0) * sub_cells + cidx] =
             static_cast<float>(bx);
-        (*chunk)[static_cast<std::size_t>(kVarBcc2) * sub_cells + cidx] =
+        (*chunk)[static_cast<std::size_t>(bcc_index_base + 1) * sub_cells + cidx] =
             static_cast<float>(by);
-        (*chunk)[static_cast<std::size_t>(kVarBcc3) * sub_cells + cidx] =
+        (*chunk)[static_cast<std::size_t>(bcc_index_base + 2) * sub_cells + cidx] =
             static_cast<float>(bz);
+      }
+    }
+  }
+
+  return true;
+}
+
+bool Downsampler::ComputeDownsampledTurbulenceChunk(int local_fine_mb,
+                                                    std::vector<float>* chunk) const {
+  const auto* phys = reader_.GetPhysicsReader();
+  if (phys == nullptr) {
+    return false;
+  }
+
+  const auto& config = reader_.GetPhysicsConfig();
+  if (!config.has_turbulence) {
+    return false;
+  }
+  const int out_vars = config.nforce;
+  if (out_vars <= 0) {
+    return false;
+  }
+
+  const auto& mb_indcs = reader_.GetMBIndcs();
+  const int ng = mb_indcs.ng;
+  const int nx1 = mb_indcs.nx1;
+  const int nx2 = (mb_indcs.nx2 > 1) ? mb_indcs.nx2 : 1;
+  const int nx3 = (mb_indcs.nx3 > 1) ? mb_indcs.nx3 : 1;
+
+  if ((nx1 % downsample_factor_) != 0
+      || (multi_d_ && (nx2 % downsample_factor_) != 0)
+      || (three_d_ && (nx3 % downsample_factor_) != 0)) {
+    return false;
+  }
+
+  const int nx1_sub = nx1 / downsample_factor_;
+  const int nx2_sub = multi_d_ ? (nx2 / downsample_factor_) : 1;
+  const int nx3_sub = three_d_ ? (nx3 / downsample_factor_) : 1;
+
+  const int nout1 = nx1 + 2 * ng;
+  const int nout2 = multi_d_ ? (nx2 + 2 * ng) : 1;
+  const int nout3 = three_d_ ? (nx3 + 2 * ng) : 1;
+  const int ncells = nout1 * nout2 * nout3;
+
+  const auto& turb = phys->GetTurbData().at(local_fine_mb);
+  const std::uint64_t expected =
+      static_cast<std::uint64_t>(out_vars) * static_cast<std::uint64_t>(ncells);
+  if (turb.size() != expected) {
+    return false;
+  }
+
+  const std::uint64_t sub_cells =
+      static_cast<std::uint64_t>(nx1_sub) * nx2_sub * nx3_sub;
+  chunk->assign(static_cast<std::size_t>(out_vars) * sub_cells, 0.0F);
+
+  const Real inv_vol = 1.0 / static_cast<Real>(nfine_per_coarse_);
+  const int jj_max = multi_d_ ? downsample_factor_ : 1;
+  const int kk_max = three_d_ ? downsample_factor_ : 1;
+
+  auto read_var = [&](int v, std::uint64_t idx) -> Real {
+    return turb[static_cast<std::uint64_t>(v) * ncells + idx];
+  };
+
+  for (int k = 0; k < nx3_sub; ++k) {
+    for (int j = 0; j < nx2_sub; ++j) {
+      for (int i = 0; i < nx1_sub; ++i) {
+        const int fi = ng + downsample_factor_ * i;
+        const int fj = multi_d_ ? (ng + downsample_factor_ * j) : 0;
+        const int fk = three_d_ ? (ng + downsample_factor_ * k) : 0;
+
+        const std::uint64_t cidx = CellIndex(i, j, k, nx1_sub, nx2_sub);
+        for (int v = 0; v < out_vars; ++v) {
+          Real sum = 0.0;
+          for (int kk = 0; kk < kk_max; ++kk) {
+            for (int jj = 0; jj < jj_max; ++jj) {
+              for (int ii = 0; ii < downsample_factor_; ++ii) {
+                const std::uint64_t idx =
+                    CellIndex(fi + ii, fj + jj, fk + kk, nout1, nout2);
+                sum += read_var(v, idx);
+              }
+            }
+          }
+          (*chunk)[static_cast<std::size_t>(v) * sub_cells + cidx] =
+              static_cast<float>(inv_vol * sum);
+        }
       }
     }
   }
@@ -542,9 +712,7 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
   if (!ParseEOS()) {
     return false;
   }
-  ComputeCoarseMeshConfig();
-
-  if (!BuildCoarseLogicalLocations()) {
+  if (!EnsureCoarseSetup()) {
     return false;
   }
 
@@ -585,8 +753,27 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
 
   const std::uint64_t cells =
       static_cast<std::uint64_t>(nx1) * nx2 * nx3;
-  std::vector<float> local_data(static_cast<std::size_t>(coarse_nmb_thisrank) * kOutVars
-                                * cells, 0.0F);
+
+  const auto& config = reader_.GetPhysicsConfig();
+  const bool has_energy = (config.nmhd >= 5);
+  const bool ideal_eos = (eos_ == "ideal");
+  const bool isothermal_eos = (eos_ == "isothermal");
+  if (!ideal_eos && !isothermal_eos) {
+    if (my_rank == 0) {
+      std::cerr << "ERROR: Unsupported EOS '" << eos_ << "'" << std::endl;
+    }
+    return false;
+  }
+  if (ideal_eos && !has_energy) {
+    if (my_rank == 0) {
+      std::cerr << "ERROR: Ideal EOS requires energy (nmhd >= 5)" << std::endl;
+    }
+    return false;
+  }
+  const int out_vars = ideal_eos ? 8 : 7;
+
+  std::vector<float> local_data(
+      static_cast<std::size_t>(coarse_nmb_thisrank) * out_vars * cells, 0.0F);
 
   std::vector<int> recv_counts(coarse_nmb_thisrank, 0);
 
@@ -626,6 +813,13 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
       }
       return false;
     }
+    if (chunk.size() != static_cast<std::size_t>(out_vars) * sub_cells) {
+      if (my_rank == 0) {
+        std::cerr << "ERROR: Unexpected downsample chunk size " << chunk.size()
+                  << std::endl;
+      }
+      return false;
+    }
 
     if (owner_rank == my_rank) {
       const int local_cg = coarse_gid - coarse_gid_start;
@@ -642,8 +836,8 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
       const int k_off = ox3 * nx3_sub;
 
       const std::uint64_t block_offset =
-          static_cast<std::uint64_t>(local_cg) * kOutVars * cells;
-      for (int v = 0; v < kOutVars; ++v) {
+          static_cast<std::uint64_t>(local_cg) * out_vars * cells;
+      for (int v = 0; v < out_vars; ++v) {
         const float* chunk_var = chunk.data() + static_cast<std::uint64_t>(v) * sub_cells;
         float* out_var = local_data.data() + block_offset
                          + static_cast<std::uint64_t>(v) * cells;
@@ -728,7 +922,7 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
     std::memcpy(&n_chunks, recv_buf.data(), sizeof(n_chunks));
     pos += sizeof(n_chunks);
 
-    const std::size_t floats_per_chunk = static_cast<std::size_t>(kOutVars) * sub_cells;
+    const std::size_t floats_per_chunk = static_cast<std::size_t>(out_vars) * sub_cells;
     const std::size_t bytes_per_chunk =
         sizeof(ChunkHeader) + sizeof(float) * floats_per_chunk;
     std::vector<float> chunk_storage(floats_per_chunk);
@@ -762,8 +956,8 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
       const int k_off = ox3 * nx3_sub;
 
       const std::uint64_t block_offset =
-          static_cast<std::uint64_t>(local_cg) * kOutVars * cells;
-      for (int v = 0; v < kOutVars; ++v) {
+          static_cast<std::uint64_t>(local_cg) * out_vars * cells;
+      for (int v = 0; v < out_vars; ++v) {
         const float* chunk_var =
             chunk_storage.data() + static_cast<std::uint64_t>(v) * sub_cells;
         float* out_var = local_data.data() + block_offset
@@ -814,8 +1008,333 @@ bool Downsampler::DownsampleToBinary(const std::string& output_filename) {
       ParameterParser::ReplaceMeshNx(reader_.GetParameterString(), coarse_mesh_indcs_.nx1,
                                      coarse_mesh_indcs_.nx2, coarse_mesh_indcs_.nx3);
 
-  const std::vector<std::string> labels = {"dens", "vel1", "vel2", "vel3",
-                                           "press", "Bcc1", "Bcc2", "Bcc3"};
+  std::vector<std::string> labels = {"dens", "velx", "vely", "velz"};
+  if (ideal_eos) {
+    labels.push_back("eint");
+  }
+  labels.push_back("bcc1");
+  labels.push_back("bcc2");
+  labels.push_back("bcc3");
+
+  BinaryWriter writer(my_rank, nranks);
+  return writer.WriteBinaryFile(output_filename, labels, param_out, reader_.GetTime(),
+                               reader_.GetNCycle(), coarse_mesh_size_, coarse_root_level_,
+                               nmb_rootx1, nmb_rootx2, nmb_rootx3, coarse_mb_indcs_,
+                               coarse_lloc_eachmb_, coarse_dist, local_data);
+}
+
+bool Downsampler::DownsampleTurbulenceToBinary(const std::string& output_filename) {
+  if (downsample_factor_ != 2 && downsample_factor_ != 4) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: Unsupported downsample factor " << downsample_factor_
+                << " (supported: 2 or 4)" << std::endl;
+    }
+    return false;
+  }
+
+  const auto& config = reader_.GetPhysicsConfig();
+  if (!config.has_turbulence) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: Restart file does not contain turbulence force data"
+                << std::endl;
+    }
+    return false;
+  }
+
+  if (config.nforce <= 0) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: Invalid turbulence force variable count nforce="
+                << config.nforce << std::endl;
+    }
+    return false;
+  }
+
+  if (!EnsureCoarseSetup()) {
+    return false;
+  }
+
+  const auto& mesh_indcs = reader_.GetMeshIndcs();
+  if ((mesh_indcs.nx1 % downsample_factor_) != 0
+      || (multi_d_ && (mesh_indcs.nx2 % downsample_factor_) != 0)
+      || (three_d_ && (mesh_indcs.nx3 % downsample_factor_) != 0)) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: Global mesh dimensions must be divisible by "
+                << downsample_factor_ << std::endl;
+    }
+    return false;
+  }
+
+  const RegionIndcs& mb_indcs = reader_.GetMBIndcs();
+  if ((mb_indcs.nx1 % downsample_factor_) != 0
+      || (multi_d_ && (mb_indcs.nx2 % downsample_factor_) != 0)
+      || (three_d_ && (mb_indcs.nx3 % downsample_factor_) != 0)) {
+    if (reader_.GetMyRank() == 0) {
+      std::cerr << "ERROR: MeshBlock cell counts must be divisible by "
+                << downsample_factor_ << std::endl;
+    }
+    return false;
+  }
+
+  const int my_rank = reader_.GetMyRank();
+  const int nranks = reader_.GetNRanks();
+
+  MPIDistribution coarse_dist(nranks, coarse_nmb_total_);
+  coarse_dist.SetupDistribution();
+
+  const int coarse_gid_start = coarse_dist.GetStartingMeshBlockID(my_rank);
+  const int coarse_nmb_thisrank = coarse_dist.GetNumMeshBlocks(my_rank);
+
+  const int nx1 = mb_indcs.nx1;
+  const int nx2 = (mb_indcs.nx2 > 1) ? mb_indcs.nx2 : 1;
+  const int nx3 = (mb_indcs.nx3 > 1) ? mb_indcs.nx3 : 1;
+
+  const std::uint64_t cells =
+      static_cast<std::uint64_t>(nx1) * nx2 * nx3;
+
+  const int out_vars = config.nforce;
+  std::vector<float> local_data(
+      static_cast<std::size_t>(coarse_nmb_thisrank) * out_vars * cells, 0.0F);
+
+  std::vector<int> recv_counts(coarse_nmb_thisrank, 0);
+
+  const int fine_gid_start =
+      reader_.GetMPIDistribution()->GetStartingMeshBlockID(my_rank);
+  const int fine_nmb_thisrank = reader_.GetNMBThisRank();
+
+  const int nx1_sub = nx1 / downsample_factor_;
+  const int nx2_sub = multi_d_ ? (nx2 / downsample_factor_) : 1;
+  const int nx3_sub = three_d_ ? (nx3 / downsample_factor_) : 1;
+  const std::uint64_t sub_cells =
+      static_cast<std::uint64_t>(nx1_sub) * nx2_sub * nx3_sub;
+
+  const auto& coarse_gids_eachrank = coarse_dist.GetGidsEachRank();
+  const auto& coarse_nmb_eachrank = coarse_dist.GetNmbEachRank();
+
+  std::vector<std::vector<char>> send_buffers(nranks);
+  std::vector<int> send_chunk_counts(nranks, 0);
+
+  std::uint64_t local_chunks_inserted = 0;
+
+  for (int lf = 0; lf < fine_nmb_thisrank; ++lf) {
+    const int fine_gid = fine_gid_start + lf;
+    const int coarse_gid = fine_gid / nfine_per_coarse_;
+    const int child_index = fine_gid % nfine_per_coarse_;
+
+    const int owner_rank =
+        FindRankForGid(coarse_gids_eachrank, coarse_nmb_eachrank, coarse_gid);
+
+    std::vector<float> chunk;
+    if (!ComputeDownsampledTurbulenceChunk(lf, &chunk)) {
+      if (my_rank == 0) {
+        std::cerr << "ERROR: Failed to downsample turbulence for fine MeshBlock gid "
+                  << fine_gid << std::endl;
+      }
+      return false;
+    }
+    if (chunk.size() != static_cast<std::size_t>(out_vars) * sub_cells) {
+      if (my_rank == 0) {
+        std::cerr << "ERROR: Unexpected turbulence chunk size " << chunk.size()
+                  << std::endl;
+      }
+      return false;
+    }
+
+    if (owner_rank == my_rank) {
+      const int local_cg = coarse_gid - coarse_gid_start;
+      if (local_cg < 0 || local_cg >= coarse_nmb_thisrank) {
+        return false;
+      }
+
+      const int ox1 = ChildOffsetX1(child_index);
+      const int ox2 = multi_d_ ? ChildOffsetX2(child_index) : 0;
+      const int ox3 = three_d_ ? ChildOffsetX3(child_index) : 0;
+
+      const int i_off = ox1 * nx1_sub;
+      const int j_off = ox2 * nx2_sub;
+      const int k_off = ox3 * nx3_sub;
+
+      const std::uint64_t block_offset =
+          static_cast<std::uint64_t>(local_cg) * out_vars * cells;
+      for (int v = 0; v < out_vars; ++v) {
+        const float* chunk_var =
+            chunk.data() + static_cast<std::uint64_t>(v) * sub_cells;
+        float* out_var = local_data.data() + block_offset
+                         + static_cast<std::uint64_t>(v) * cells;
+
+        for (int k = 0; k < nx3_sub; ++k) {
+          for (int j = 0; j < nx2_sub; ++j) {
+            for (int i = 0; i < nx1_sub; ++i) {
+              const std::uint64_t cidx = CellIndex(i, j, k, nx1_sub, nx2_sub);
+              const std::uint64_t pidx =
+                  CellIndex(i_off + i, j_off + j, k_off + k, nx1, nx2);
+              out_var[pidx] = chunk_var[cidx];
+            }
+          }
+        }
+      }
+
+      recv_counts[local_cg] += 1;
+      local_chunks_inserted += 1;
+    } else {
+      if (send_chunk_counts[owner_rank] == 0) {
+        send_buffers[owner_rank].resize(sizeof(std::int32_t), 0);
+      }
+
+      ChunkHeader header;
+      header.coarse_gid = coarse_gid;
+      header.child_index = child_index;
+
+      auto& buf = send_buffers[owner_rank];
+      const std::size_t start = buf.size();
+      buf.resize(start + sizeof(header) + sizeof(float) * chunk.size());
+      std::memcpy(buf.data() + start, &header, sizeof(header));
+      std::memcpy(buf.data() + start + sizeof(header), chunk.data(),
+                  sizeof(float) * chunk.size());
+      send_chunk_counts[owner_rank] += 1;
+    }
+  }
+
+  for (int r = 0; r < nranks; ++r) {
+    if (send_chunk_counts[r] == 0) {
+      continue;
+    }
+    std::memcpy(send_buffers[r].data(), &send_chunk_counts[r], sizeof(std::int32_t));
+  }
+
+#if MPI_PARALLEL_ENABLED
+  std::vector<MPI_Request> send_reqs;
+  send_reqs.reserve(nranks);
+  for (int r = 0; r < nranks; ++r) {
+    if (send_chunk_counts[r] == 0) {
+      continue;
+    }
+    MPI_Request req;
+    MPI_Isend(send_buffers[r].data(), static_cast<int>(send_buffers[r].size()), MPI_BYTE,
+              r, 901, MPI_COMM_WORLD, &req);
+    send_reqs.push_back(req);
+  }
+#else
+  (void)send_buffers;
+#endif
+
+  const std::uint64_t total_needed =
+      static_cast<std::uint64_t>(coarse_nmb_thisrank) * nfine_per_coarse_;
+  const std::uint64_t remote_needed = total_needed - local_chunks_inserted;
+
+  std::uint64_t remote_received = 0;
+
+#if MPI_PARALLEL_ENABLED
+  while (remote_received < remote_needed) {
+    MPI_Status status;
+    MPI_Probe(MPI_ANY_SOURCE, 901, MPI_COMM_WORLD, &status);
+    int nbytes = 0;
+    MPI_Get_count(&status, MPI_BYTE, &nbytes);
+    if (nbytes <= 0) {
+      break;
+    }
+    std::vector<char> recv_buf(static_cast<std::size_t>(nbytes));
+    MPI_Recv(recv_buf.data(), nbytes, MPI_BYTE, status.MPI_SOURCE, 901, MPI_COMM_WORLD,
+             MPI_STATUS_IGNORE);
+
+    std::size_t pos = 0;
+    std::int32_t n_chunks = 0;
+    if (recv_buf.size() < sizeof(n_chunks)) {
+      return false;
+    }
+    std::memcpy(&n_chunks, recv_buf.data(), sizeof(n_chunks));
+    pos += sizeof(n_chunks);
+
+    const std::size_t floats_per_chunk = static_cast<std::size_t>(out_vars) * sub_cells;
+    const std::size_t bytes_per_chunk =
+        sizeof(ChunkHeader) + sizeof(float) * floats_per_chunk;
+    std::vector<float> chunk_storage(floats_per_chunk);
+    for (int c = 0; c < n_chunks; ++c) {
+      if (pos + bytes_per_chunk > recv_buf.size()) {
+        return false;
+      }
+      ChunkHeader header;
+      std::memcpy(&header, recv_buf.data() + pos, sizeof(header));
+      pos += sizeof(header);
+
+      std::memcpy(chunk_storage.data(), recv_buf.data() + pos,
+                  sizeof(float) * floats_per_chunk);
+      pos += sizeof(float) * floats_per_chunk;
+
+      const int coarse_gid = header.coarse_gid;
+      const int child_index = header.child_index;
+
+      if (coarse_gid < coarse_gid_start
+          || coarse_gid >= coarse_gid_start + coarse_nmb_thisrank) {
+        return false;
+      }
+      const int local_cg = coarse_gid - coarse_gid_start;
+
+      const int ox1 = ChildOffsetX1(child_index);
+      const int ox2 = multi_d_ ? ChildOffsetX2(child_index) : 0;
+      const int ox3 = three_d_ ? ChildOffsetX3(child_index) : 0;
+
+      const int i_off = ox1 * nx1_sub;
+      const int j_off = ox2 * nx2_sub;
+      const int k_off = ox3 * nx3_sub;
+
+      const std::uint64_t block_offset =
+          static_cast<std::uint64_t>(local_cg) * out_vars * cells;
+      for (int v = 0; v < out_vars; ++v) {
+        const float* chunk_var =
+            chunk_storage.data() + static_cast<std::uint64_t>(v) * sub_cells;
+        float* out_var = local_data.data() + block_offset
+                         + static_cast<std::uint64_t>(v) * cells;
+        for (int k = 0; k < nx3_sub; ++k) {
+          for (int j = 0; j < nx2_sub; ++j) {
+            for (int i = 0; i < nx1_sub; ++i) {
+              const std::uint64_t cidx = CellIndex(i, j, k, nx1_sub, nx2_sub);
+              const std::uint64_t pidx =
+                  CellIndex(i_off + i, j_off + j, k_off + k, nx1, nx2);
+              out_var[pidx] = chunk_var[cidx];
+            }
+          }
+        }
+      }
+
+      recv_counts[local_cg] += 1;
+      remote_received += 1;
+    }
+  }
+
+  if (!send_reqs.empty()) {
+    MPI_Waitall(static_cast<int>(send_reqs.size()), send_reqs.data(),
+                MPI_STATUSES_IGNORE);
+  }
+#else
+  if (remote_needed != 0) {
+    return false;
+  }
+#endif
+
+  for (int m = 0; m < coarse_nmb_thisrank; ++m) {
+    if (recv_counts[m] != nfine_per_coarse_) {
+      if (my_rank == 0) {
+        std::cerr << "ERROR: Coarse MeshBlock " << (coarse_gid_start + m)
+                  << " received " << recv_counts[m] << " children, expected "
+                  << nfine_per_coarse_ << std::endl;
+      }
+      return false;
+    }
+  }
+
+  const int nmb_rootx1 = coarse_mesh_indcs_.nx1 / coarse_mb_indcs_.nx1;
+  const int nmb_rootx2 = multi_d_ ? (coarse_mesh_indcs_.nx2 / coarse_mb_indcs_.nx2) : 1;
+  const int nmb_rootx3 = three_d_ ? (coarse_mesh_indcs_.nx3 / coarse_mb_indcs_.nx3) : 1;
+
+  std::string param_out =
+      ParameterParser::ReplaceMeshNx(reader_.GetParameterString(), coarse_mesh_indcs_.nx1,
+                                     coarse_mesh_indcs_.nx2, coarse_mesh_indcs_.nx3);
+
+  std::vector<std::string> labels;
+  labels.reserve(static_cast<std::size_t>(out_vars));
+  for (int v = 0; v < out_vars; ++v) {
+    labels.push_back("force" + std::to_string(v + 1));
+  }
 
   BinaryWriter writer(my_rank, nranks);
   return writer.WriteBinaryFile(output_filename, labels, param_out, reader_.GetTime(),
